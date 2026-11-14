@@ -1,4 +1,4 @@
-"""Live hooks on a benign local arithmetic process; no vulnerability fixtures."""
+﻿"""Live hooks on a benign local arithmetic process; no vulnerability fixtures."""
 from __future__ import annotations
 
 import copy
@@ -69,6 +69,9 @@ class LiveFixture:
 
     def probe(self, config=None, catalog=None):
         return self.script.exports_sync.probe(config or self.config, catalog or self.catalog)
+
+    def stats(self):
+        return self.script.exports_sync.stats()
 
     def command(self, command):
         self.process.stdin.write(command + '\n')
@@ -688,3 +691,76 @@ def test_probe_reports_invalid_action_call(live):
         'calls': [{'module': 'libc.so.6', 'symbol': 'vg_missing_symbol', 'args': []}],
     }
     assert 'E_ACTION_CALL_INVALID' in _probe_codes(live.probe(config, catalog))
+
+from runtime.frida import smoke
+from runtime.frida.result import EXIT_SMOKE
+
+SMOKE_SPEC = {'type': 'signal', 'signal': 'SIGUSR1', 'hook': 'limit_guard', 'timeout_ms': 2000}
+_skip_signal = pytest.mark.skipif(os.name == 'nt', reason='signal smoke uses SIGUSR1')
+
+
+@_skip_signal
+def test_smoke_signal_verifies_guard(live):
+    assert live.install()['guards'] == 2
+    effect = smoke.run(live.script, SMOKE_SPEC, live.process.pid)
+    assert effect['status'] == 'installed_verified', effect
+    assert effect['blocks'] >= 1
+
+
+def test_smoke_absent_is_unverified(live):
+    live.install()
+    effect = smoke.run(live.script, None, live.process.pid)
+    assert effect['status'] == 'installed_unverified'
+    assert effect['code'] == 'E_SMOKE_NOT_DECLARED'
+
+
+@_skip_signal
+def test_smoke_failure_detected(live):
+    config = copy.deepcopy(live.config)
+    config['guards'] = [dict(config['guards'][0], code=list(PASS_BYTECODE), observations=[])]
+    config['maps'] = {}
+    config['observers'] = []
+    live.install(config)
+    effect = smoke.run(live.script, SMOKE_SPEC, live.process.pid)
+    assert effect['status'] == 'failed'
+    assert effect['code'] == 'E_SMOKE_FAILED'
+
+
+@_skip_signal
+def test_standalone_launcher_reports_smoke_status(package, tmp_path):
+    manifest = json.loads((package / 'fixture.manifest.json').read_text(encoding='utf-8'))
+    manifest['smoke'] = dict(SMOKE_SPEC)
+    smoke_manifest = package / 'smoke.manifest.json'
+    smoke_manifest.write_text(json.dumps(manifest), encoding='utf-8')
+    exe = package / ('frida_fixture.exe' if os.name == 'nt' else 'frida_fixture')
+    result = subprocess.run([
+        sys.executable, str(package / 'run.py'), '--spawn', str(exe),
+        '--manifest', str(smoke_manifest),
+        '--catalog', str(package / 'fixture.actions.json'), '--duration', '0.2',
+    ], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    effects = [json.loads(line) for line in result.stdout.splitlines()
+               if line.startswith('{') and '"effect"' in line]
+    assert effects and effects[-1]['status'] == 'installed_verified'
+
+
+
+
+
+@_skip_signal
+def test_multiproc_reports_smoke_status(package, tmp_path):
+    manifest = json.loads((package / 'fixture.manifest.json').read_text(encoding='utf-8'))
+    manifest['smoke'] = dict(SMOKE_SPEC)
+    smoke_manifest = package / 'smoke.multiproc.manifest.json'
+    smoke_manifest.write_text(json.dumps(manifest), encoding='utf-8')
+    exe = package / ('frida_fixture.exe' if os.name == 'nt' else 'frida_fixture')
+    result = subprocess.run([
+        sys.executable, str(package / 'multiproc.py'), '--spawn', str(exe),
+        '--manifest', str(smoke_manifest),
+        '--catalog', str(package / 'fixture.actions.json'),
+        '--interval', '0.02', '--duration', '0.6',
+    ], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    summaries = [json.loads(line) for line in result.stdout.splitlines()
+                 if line.startswith('{') and '"summary"' in line]
+    assert summaries and summaries[-1]['effects']['installed_verified'] == 1

@@ -57,6 +57,7 @@
 | 6 | 目标不匹配（build-id/哈希/架构不符） |
 | 7 | 部分目标失败（`--fail-fast` 下不会出现） |
 | 8 | 已安装/重复安装 |
+| 9 | smoke 未产生预期 BLOCK（已卸载，除非 `--smoke-warn-only`） |
 
 ### 2.2 挂点错误码
 
@@ -127,12 +128,14 @@
 - probe 校验：`calls` 的 module/symbol 可解析、参数引用/常量/字符串合法、`once` 为布尔；否则 `E_ACTION_CALL_INVALID` / `E_ACTION_WRITE_INVALID`。
 - 验收：输出指针置 NULL、多字段写、清理函数调用、once 幂等、NULL 目标写失败诊断、probe 非法调用拒绝，均在 WSL 实测通过。
 
-### WP4 生效自证（P0）
+### WP4 生效自证（P0）—— 已完成
 
-- `manifest.smoke`：声明触发方式（命令行 stdin 行、HTTP 请求、C 调用、文件输入）；
-- 安装后自动执行一次，检查 `BLOCK` + 动作返回值；记录到 receipt `effect`；
-- 无 smoke：`installed_unverified`；smoke 失败：`failed` + `E_SMOKE_FAILED`（可配置为仅告警）；
-- 验收：有/无/失败三种状态可区分；smoke 不修改目标持久状态（或声明并清理）。
+- `manifest.smoke` 声明一次触发方式：`{"type": "signal", "signal": "SIGUSR1", "hook": "guard_id", "timeout_ms": 2000}`，也支持 `{"type": "exec", "command": "... {pid} ..."}` 与 `{"type": "none"}`；`run.py`/`multiproc.py` 安装后自动触发并轮询该 hook 的 BLOCK 计数。
+- 结果三分：`installed_verified`（观察到 BLOCK）、`installed_unverified`（未声明 smoke，`E_SMOKE_NOT_DECLARED`）、`failed`（声明了但没观察到 BLOCK，`E_SMOKE_FAILED`）。
+- 失败策略：默认卸载已装 bundle 并以退出码 9 结束；`--smoke-warn-only` 保留安装、只告警。
+- agent 新增 `stats()` RPC，按 hook 返回 `{calls, blocks}`；`install` 回执与 `effect` 一起写入 JSON 输出。
+- 限制：shim guard 尚无决策计数（smoke 无法验证 shim 目标）；`exec` 触发命令由补丁作者负责幂等与安全。
+- 验收：signal 触发验证 guard、未声明 smoke 记 unverified、PASS-only 补丁被判 failed、CLI 与多进程路径均输出 smoke 状态，均在 WSL 实测通过。
 
 ### WP5 多进程与角色（P0）
 
@@ -203,7 +206,7 @@
 | WP1 | 部分：agent 安装前会整体解析并拒绝（已有原子性），但无 `probe` RPC、无错误码体系、无 `--check-only` |
 | WP2 | 完成：标量+float/double、errno、结构体按值/sret（原生 shim）、变参拒绝；shim guard 不支持 observers/maps 与 decision 事件（安装期限制） |
 | WP3 | 完成：多字段写、输出参数初始化、`calls` 清理/组合动作、`once` 幂等、写前范围检查与诊断、probe 校验 |
-| WP4 | 缺：无 smoke、无 `installed_verified` 区分 |
+| WP4 | 完成：manifest `smoke`（signal/exec/none）、安装后自动触发、`stats()` 计数、`installed_verified`/`installed_unverified`/`failed`、失败卸载与 `--smoke-warn-only` |
 | WP5 | 部分：multiproc 扫描/跟随/逐进程安装已实现并验证；缺角色识别与首请求窗口 |
 | WP6 | 未知：无并发压测，桥状态线程安全未验证 |
 | WP7 | 部分：agent 安装失败回滚；缺卸载静默/崩溃隔离/pid 复用 |

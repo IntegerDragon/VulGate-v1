@@ -109,6 +109,17 @@ python -m runtime.frida.run --pid PID --check-only --manifest M --catalog C
 python -m runtime.frida.multiproc --exe /usr/sbin/nginx --check-only --manifest M --catalog C
 ```
 
-退出码：0 通过、2 参数错误、3 bundle 无效、4 挂点不可挂、5 权限/注入失败、6 目标不匹配、7 部分失败、8 已安装。错误码表见 `docs/ai/PATCH_INSTALL_NEXT_STEPS.md`。
+退出码：0 通过、2 参数错误、3 bundle 无效、4 挂点不可挂、5 权限/注入失败、6 目标不匹配、7 部分失败、8 已安装、9 smoke 未生效。错误码表见 `docs/ai/PATCH_INSTALL_NEXT_STEPS.md`。
+
+## 生效自证
+
+manifest 可声明一次 smoke 触发：
+
+```json
+{"smoke": {"type": "signal", "signal": "SIGUSR1", "hook": "guard_id", "timeout_ms": 2000}}
+```
+
+安装后 launcher 触发目标并检查该 hook 的 BLOCK 计数：观察到即 `installed_verified`，未声明为 `installed_unverified`，声明但未观察到为 `failed`（`E_SMOKE_FAILED`）。失败默认卸载并以退出码 9 结束；`--smoke-warn-only` 保留安装并告警。也支持 `{"type": "exec", "command": "... {pid} ..."}` 与 `{"type": "none"}`。
+
 
 

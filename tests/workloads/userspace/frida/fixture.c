@@ -1,8 +1,12 @@
 /* Benign arithmetic fixture: the counter proves whether the body ran. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <signal.h>
 #include <inttypes.h>
 
 #ifdef _WIN32
@@ -73,12 +77,50 @@ ENTRY struct vg_pair fixture_pair(struct vg_pair pair, double scale)
     return result;
 }
 
+#ifdef _WIN32
+static volatile int signal_pending;
+#else
+static volatile sig_atomic_t signal_pending;
+
+static void fixture_on_signal(int signo)
+{
+    (void)signo;
+    signal_pending = 1;
+}
+#endif
+
 int main(void)
 {
     char line[128];
+#ifndef _WIN32
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = fixture_on_signal;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+    sigaction(SIGUSR1, &action, NULL);
+#endif
     setvbuf(stdout, NULL, _IONBF, 0);
     puts("{\"ready\":true}");
-    while (fgets(line, sizeof(line), stdin)) {
+    while (1) {
+        char *got = fgets(line, sizeof(line), stdin);
+        if (got == NULL) {
+            if (signal_pending) {
+                signal_pending = 0;
+                (void)fixture_target(1, 5);
+#ifndef _WIN32
+                clearerr(stdin);
+#endif
+                continue;
+            }
+            if (feof(stdin)) break;
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (signal_pending) {
+            signal_pending = 0;
+            (void)fixture_target(1, 5);
+        }
         if (strncmp(line, "typed", 5) == 0) {
             uint64_t output = 0;
             int64_t wide = fixture_wide(7);

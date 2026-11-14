@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Load a local VulGate bundle into a selected userspace process with Frida."""
 from __future__ import annotations
 
@@ -10,10 +10,12 @@ import sys
 import threading
 
 try:
-    from .result import EXIT_OK, classify_exception, classify_probe
+    from .result import EXIT_OK, EXIT_SMOKE, classify_exception, classify_probe
+    from .smoke import run as run_smoke, validate as validate_smoke
 except ImportError:  # direct `python runtime/frida/run.py`
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from result import EXIT_OK, classify_exception, classify_probe
+    from result import EXIT_OK, EXIT_SMOKE, classify_exception, classify_probe
+    from smoke import run as run_smoke, validate as validate_smoke
 
 
 def load_bundle(manifest: Path, catalog: Path) -> tuple[dict, dict]:
@@ -42,6 +44,12 @@ def load_bundle(manifest: Path, catalog: Path) -> tuple[dict, dict]:
             if expected is not None and hashlib.sha256(shim_path.read_bytes()).hexdigest() != expected:
                 raise ValueError('shim artifact mismatch: ' + str(shim_path))
             guard['shim'] = {**shim, 'path': str(shim_path)}
+    smoke_spec = config.get('smoke')
+    if smoke_spec is not None:
+        try:
+            validate_smoke(smoke_spec)
+        except ValueError as error:
+            raise ValueError('invalid smoke: ' + str(error)) from error
     return config, actions
 
 
@@ -58,6 +66,8 @@ def main() -> None:
     parser.add_argument('--duration', type=float, help='detach after this many seconds; otherwise Ctrl+C')
     parser.add_argument('--check-only', action='store_true',
                         help='resolve and validate the bundle without installing hooks')
+    parser.add_argument('--smoke-warn-only', action='store_true',
+                        help='keep the bundle installed even when the declared smoke check fails')
     args = parser.parse_args()
     if args.duration is not None and args.duration < 0:
         parser.error('--duration must be nonnegative')
@@ -68,7 +78,8 @@ def main() -> None:
         sys.exit(classify_exception(error))
     device = frida.get_local_device()
     try:
-        pid = device.spawn([str(args.spawn.resolve()), *args.arg]) if args.spawn else args.pid
+        spawn_stdio = 'pipe' if (args.spawn and config.get('smoke')) else None
+        pid = device.spawn([str(args.spawn.resolve()), *args.arg], stdio=spawn_stdio) if args.spawn else args.pid
     except Exception as error:
         print(json.dumps({'event': 'spawn-failed', 'error': str(error)}, ensure_ascii=False), flush=True)
         sys.exit(classify_exception(error))
@@ -101,6 +112,12 @@ def main() -> None:
         print(json.dumps(dict(result, pid=pid, frida=frida.__version__)), flush=True)
         if args.spawn:
             device.resume(pid)
+        effect = run_smoke(script, config.get('smoke'), pid)
+        status = effect.get('status', 'installed_unverified')
+        print(json.dumps({'event': 'effect', 'pid': pid, 'status': status, 'effect': effect},
+                         ensure_ascii=False), flush=True)
+        if status == 'failed' and not args.smoke_warn_only:
+            sys.exit(EXIT_SMOKE)
         detached.wait(args.duration)
     except KeyboardInterrupt:
         pass
@@ -109,10 +126,19 @@ def main() -> None:
             if session is not None and not detached.is_set():
                 try:
                     if script is not None:
-                        script.exports_sync.uninstall()
-                        script.unload()
+                        try:
+                            script.exports_sync.uninstall()
+                        except Exception:
+                            pass
+                        try:
+                            script.unload()
+                        except Exception:
+                            pass
                 finally:
-                    session.detach()
+                    try:
+                        session.detach()
+                    except Exception:
+                        pass
         finally:
             if args.spawn and not exited.is_set():
                 try:
@@ -123,3 +149,5 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
+

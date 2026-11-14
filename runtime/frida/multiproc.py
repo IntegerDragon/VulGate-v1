@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Install one VulGate bundle into every matching userspace process.
 
 Unlike run.py (a single --pid or one --spawn), this launcher keeps scanning for
@@ -23,9 +23,11 @@ except ImportError:  # direct `python runtime/frida/multiproc.py`
     from run import load_bundle
 
 try:
-    from .result import EXIT_OK, classify_exception, exit_code_for_summary, summarize_probe
+    from .result import EXIT_OK, EXIT_SMOKE, classify_exception, exit_code_for_summary, summarize_probe
+    from .smoke import run as run_smoke
 except ImportError:
-    from result import EXIT_OK, classify_exception, exit_code_for_summary, summarize_probe
+    from result import EXIT_OK, EXIT_SMOKE, classify_exception, exit_code_for_summary, summarize_probe
+    from smoke import run as run_smoke
 
 
 def read_exe(pid: int) -> str | None:
@@ -101,7 +103,7 @@ class ProcessInstall:
     """One attached process and its script/session."""
 
     __slots__ = ('pid', 'exe', 'session', 'script', 'receipt', 'detached',
-                 'decisions', 'blocks')
+                 'decisions', 'blocks', 'effect')
 
     def __init__(self, pid: int, exe: str, session, script, receipt: dict):
         self.pid = pid
@@ -112,6 +114,7 @@ class ProcessInstall:
         self.detached = threading.Event()
         self.decisions = 0
         self.blocks = 0
+        self.effect = None
 
 
 def attach_and_install(device, pid: int, exe: str, agent_source: str,
@@ -177,6 +180,8 @@ def main() -> None:
     parser.add_argument('--summary', type=Path, help='write the final JSON summary here')
     parser.add_argument('--check-only', action='store_true',
                         help='resolve and validate the bundle on every target without installing')
+    parser.add_argument('--smoke-warn-only', action='store_true',
+                        help='keep the bundle installed even when the declared smoke check fails')
     args = parser.parse_args()
     if args.interval <= 0:
         parser.error('--interval must be positive')
@@ -194,7 +199,8 @@ def main() -> None:
     device = frida.get_local_device()
     exclude = set(args.exclude_pid)
     try:
-        spawned_pid = device.spawn([str(args.spawn.resolve()), *args.arg]) if args.spawn else None
+        spawn_stdio = 'pipe' if (args.spawn and config.get('smoke')) else None
+        spawned_pid = device.spawn([str(args.spawn.resolve()), *args.arg], stdio=spawn_stdio) if args.spawn else None
     except Exception as error:
         print(json.dumps({'event': 'spawn-failed', 'error': str(error)}, ensure_ascii=False), flush=True)
         sys.exit(classify_exception(error))
@@ -202,6 +208,8 @@ def main() -> None:
     failures: dict[int, str] = {}
     detached_pids: set[int] = set()
     installed_count = 0
+    smoke_failed = False
+    effect_counts = {'installed_verified': 0, 'installed_unverified': 0, 'failed': 0}
     lock = threading.Lock()
 
     def emit(payload: dict) -> None:
@@ -276,16 +284,39 @@ def main() -> None:
                     continue
                 records[pid] = record
                 installed_count += 1
-                emit({'event': 'installed', 'pid': pid, 'exe': exe,
-                      'receipt': record.receipt})
                 if pid == spawned_pid:
                     device.resume(pid)
+                effect = run_smoke(record.script, config.get('smoke'), pid)
+                record.effect = effect
+                status = effect.get('status', 'installed_unverified')
+                effect_counts[status] = effect_counts.get(status, 0) + 1
+                emit({'event': 'installed', 'pid': pid, 'exe': exe,
+                      'receipt': record.receipt, 'status': status, 'effect': effect})
+                if status == 'failed' and not args.smoke_warn_only:
+                    smoke_failed = True
+                    try:
+                        record.script.exports_sync.uninstall()
+                    except Exception:
+                        pass
+                    try:
+                        record.script.unload()
+                    except Exception:
+                        pass
+                    try:
+                        record.session.detach()
+                    except Exception:
+                        pass
+                    del records[pid]
+                    failures[pid] = 'E_SMOKE_FAILED'
+                    emit({'event': 'install-failed', 'pid': pid, 'exe': exe,
+                          'error': 'E_SMOKE_FAILED'})
             for pid, record in list(records.items()):
                 if record.detached.is_set() or not is_live(pid):
                     detached_pids.add(pid)
                     del records[pid]
                     emit({'event': 'detached', 'pid': pid,
-                          'decisions': record.decisions, 'blocks': record.blocks})
+                          'decisions': record.decisions, 'blocks': record.blocks,
+                          'status': (record.effect or {}).get('status')})
             time.sleep(args.interval)
     except KeyboardInterrupt:
         pass
@@ -294,13 +325,16 @@ def main() -> None:
         released = uninstall_all(active)
         for record in active:
             emit({'event': 'uninstalled', 'pid': record.pid,
-                  'decisions': record.decisions, 'blocks': record.blocks})
+                  'decisions': record.decisions, 'blocks': record.blocks,
+                  'status': (record.effect or {}).get('status')})
         summary = {
             'event': 'summary',
             'installed': installed_count,
             'uninstalled': released,
             'detached': sorted(detached_pids),
             'failed': failures,
+            'effects': effect_counts,
+            'smoke_failed': smoke_failed,
         }
         emit(summary)
         if args.summary:
@@ -310,8 +344,10 @@ def main() -> None:
                 device.kill(spawned_pid)
             except Exception:
                 pass
-    sys.exit(0)
+    sys.exit(EXIT_SMOKE if smoke_failed else EXIT_OK)
 
 
 if __name__ == '__main__':
     main()
+
+

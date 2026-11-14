@@ -484,8 +484,8 @@ rpc.exports = {
         const lastReadCount = native('vg_last_read_count', 'uint', []);
         const copyLastReads = native('vg_copy_last_reads', 'uint', ['pointer', 'uint']);
         const state = {hooks: [], handles: [], callbacks: [], active: 0, maps: new Map(),
-            argStacks: new Map(),
-            destroy: native('vg_program_destroy', 'void', ['pointer']), calls: 0};
+            argStacks: new Map(), guardStats: [], calls: 0,
+            destroy: native('vg_program_destroy', 'void', ['pointer'])};
         const mapCreate = native('vg_map_create', 'pointer', ['uint']);
         const mapSet = native('vg_map_set', 'int', ['pointer', 'uint64', 'uint64', 'uint64']);
         const mapGet = native('vg_map_get', 'int', ['pointer', 'uint64', 'uint64', 'pointer', 'int']);
@@ -583,8 +583,10 @@ rpc.exports = {
                     requireThat(Number.isSafeInteger(offset) && offset >= 0, 'invalid return offset');
                     return Process.getModuleByName(spec.module).base.add(offset).toString();
                 }));
+                spec.stats = {calls: 0, blocks: 0};
                 return {spec, target, action, handle, original, limit, returnFilter, isShim};
             });
+            state.guardStats = guards.map(item => ({id: item.spec.id, stats: item.spec.stats}));
             const recordObservation = (spec, args, context, threadId) => {
                         const map = state.maps.get(spec.map);
                         const scope = uint64(map.threadScoped ? threadId : 0);
@@ -871,6 +873,8 @@ rpc.exports = {
                             instructions: stats.readU64().toString(),
                             safe_reads: stats.add(8).readU64().toString(),
                             helper_calls: stats.add(16).readU64().toString()});
+                        spec.stats.calls++;
+                        if (!pass) spec.stats.blocks++;
                         if (!pass) {
                             if (action.errno !== undefined) this.errno = action.errno;
                             return action(args);
@@ -902,6 +906,11 @@ rpc.exports = {
         return installed === null ? {installed: false} : {installed: true,
             calls: installed.calls, active: installed.active,
             map_sizes: Object.fromEntries([...installed.maps].map(([k, v]) => [k, installed.mapSize(v.handle)]))};
+    },
+    stats() {
+        if (installed === null) return {installed: false, hooks: {}};
+        return {installed: true, hooks: Object.fromEntries(installed.guardStats.map(
+            item => [item.id, {...item.stats}]))};
     },
     barrier(token) {
         send({event: 'barrier', token});
