@@ -14,7 +14,7 @@
 
 | 库 | 机制 | 版本 | 热挂载 | 运行中安装/卸载 | 结论 |
 |---|---|---|---|---|---|
-| **funchook** | inline hook（写函数入口跳转） | `b499170` | ✅ Frida 注入 agent 后调用 | ❌ 3 次 50 轮实验：1 次通过，**2 次目标进程崩溃**（BrokenPipe）；应用层 `pause` 后 30 轮安装/卸载全部通过 | 引擎可用，但 install/uninstall **不是线程安全的**，必须先停线程 |
+| **funchook** | inline hook（写函数入口跳转） | `b499170` | ✅ Frida 注入 agent 后调用 | ❌ 无 STW 时 3 次 50 轮实验：1 次通过，**2 次目标进程崩溃**（BrokenPipe）；加自实现 STW 后 **3×50 轮全部通过** | 引擎可用，但 install/uninstall **必须配 stop-the-world** |
 | **plthook** | GOT/PLT 表项改写 | `24c69df`（已归档） | ✅ | ✅ 3 次 × 50 轮全部通过，目标存活，blocked 计数持续增长 | 可安全热安装/卸载，但只覆盖 PLT 调用 |
 | Dobby | inline hook | 仓库 HEAD | 编译失败 | 未测 | GCC 下编译问题（`__has_feature`、头文件/结构不一致），本机未跑通 |
 | subhook | inline hook | — | clone 失败 | 未测 | GitHub clone/归档下载多次超时（网络限制） |
@@ -32,6 +32,34 @@
 - 使用“主程序 → 共享库导出函数”的 PLT 调用目标（`target_plt` + `libtarget_shared.so`）；
 - 3 次 × 50 轮安装/卸载全部通过，目标存活；blocked 计数与 `hook_blocked` 一致增长；
 - 对**自包含目标**（同一可执行文件内直接调用 `target_fn`）安装返回 `-3`（找不到 PLT 表项），说明其覆盖范围严格受限。
+
+## STW（stop the world）实现与验证
+
+`stw.c` 实现了一套用户态信号停车：
+
+1. 注入器在 Frida attach **之前**读取 `/proc/<pid>/task`，把目标线程列表传给 agent（`test_set_threads`），Frida 自己的 helper 线程不会被停；
+2. install/uninstall 前向每个目标线程发 `SIGRTMIN+4`；handler 记录 `(tid, RIP)` 后自旋等待 release；
+3. handler 用 **epoch 计数**等待释放，避免“上一轮信号延迟到达 + 下一轮重置标志”把线程永久停住；
+4. 停车后检查每个线程的 PC 是否落在被覆盖的函数入口 16 字节内；若在，释放后重试（最多 50 次，间隔 200µs），直到所有线程都不在补丁区域；
+5. patch/恢复完成后置 release，等所有线程离开 handler。
+
+验证结果：
+
+| 场景 | 结果 |
+|---|---|
+| funchook 无 STW，3×50 轮 live 安装/卸载 | 1 次通过，**2 次目标崩溃** |
+| funchook + STW，3×50 轮 live 安装/卸载 | **3 次全部通过**，目标存活，blocked 计数持续增长，卸载后 `call` 恢复 105 |
+| funchook + STW，pause 后安装/恢复 | 通过（恢复后 worker 继续正常计数） |
+| plthook 无 STW | 3×50 轮通过（GOT 指针原子写，不需要 STW） |
+
+实测 STW 开销：一次 install 通常需要 1–5 轮停车（每轮 ~0.1–1ms），主要在等线程进入 handler 与避开 PC 落在补丁区域的线程；运行期无额外开销。
+
+### 已知未解决问题
+
+- **从目标主线程直接调用被 hook 的函数会挂起**（worker 线程调用正常）：即使 guard 用栈上 program / 仅做 `run_ebpf_vm`，通过 funchook 从主线程进入时仍会卡住；而“只初始化 ctx、不调用 VM”或“简单常量 guard”则正常。原因未定位，生产前必须解决（可能与我们 guard 的编译/栈布局或 funchook trampoline 有关）；
+- 线程列表由注入器在 attach 前快照，**补丁期间新建的线程不会被停**；需要周期性重新枚举或“先停住创建线程（clone hook）”；
+- PC 落在补丁区域靠重试，极端热的小函数可能多次重试；
+- 信号停车要求目标线程可被信号打断（长时间不可中断睡眠/屏蔽该信号会超时）。
 
 ## 结论
 

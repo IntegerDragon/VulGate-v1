@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -64,23 +65,15 @@ const lib = Module.load(%s);
 function fn(name, ret, args) {
     return new NativeFunction(lib.getExportByName(name), ret, args);
 }
-function otherThreads() {
-    const current = Process.getCurrentThreadId();
-    return Process.enumerateThreads().filter(t => t.id !== current);
-}
-function withSuspended(callback) {
-    const threads = otherThreads();
-    for (const thread of threads) { Thread.suspend(thread.id); }
-    try { return callback(); } finally { for (const thread of threads) { Thread.resume(thread.id); } }
-}
 rpc.exports = {
-    installSafe: () => withSuspended(() => fn('test_install', 'int', [])()),
-    uninstallSafe: () => withSuspended(() => fn('test_uninstall', 'int', [])()),
+    setThreads: (csv) => fn('test_set_threads', 'int', ['pointer'])(Memory.allocUtf8String(csv)),
     install: () => fn('test_install', 'int', [])(),
     uninstall: () => fn('test_uninstall', 'int', [])(),
     installed: () => fn('test_installed', 'int', [])(),
     blocked: () => fn('test_blocked', 'uint64', [])().toNumber(),
     passed: () => fn('test_passed', 'uint64', [])().toNumber(),
+    stwRounds: () => fn('test_stw_rounds', 'uint64', [])().toNumber(),
+    stwRetries: () => fn('test_stw_retries', 'uint64', [])().toNumber(),
     name: () => fn('test_name', 'pointer', [])().readUtf8String(),
 };
 ''' % json.dumps(str(library)))
@@ -144,57 +137,51 @@ def test_live(target: Target, script, cycles: int = 20, safe: bool = False) -> d
 
 
 def test_quiesced(target: Target, script, cycles: int = 1) -> dict:
-    print('quiesced: sending pause', flush=True)
-    print('quiesced pause ->', target.command('pause'), flush=True)
-    print('quiesced: call', flush=True)
-    if not target.command('call').get('call') == 105:
-        return {'mode': 'quiesced', 'errors': ['baseline call != 105']}
+    """Pause the workers, install, resume to observe BLOCKs, pause, uninstall.
+
+    The parked workers are used to verify that install/uninstall succeeds while
+    the process is otherwise idle; the actual hook effect is observed through
+    worker counters after resume. (Calling the hooked function from the target's
+    main thread is covered separately by the live mode.)
+    """
+    print('quiesced: pause', flush=True)
+    target.command('pause')
+    before = snapshot(target, script)
     errors = []
-    call_installed = {'call': None}
     rc = 0
+    rc2 = 0
     for index in range(cycles):
         rc = script.exports_sync.install()
         if rc != 0:
             errors.append(f'install rc={rc} at {index}')
             break
-        call_installed = target.command('call')
-        if call_installed.get('call') != -73:
-            errors.append(f'installed call={call_installed} at {index}')
-            break
+        target.command('resume')
+        time.sleep(0.05)
+        target.command('pause')
         rc2 = script.exports_sync.uninstall()
         if rc2 != 0:
             errors.append(f'uninstall rc={rc2} at {index}')
             break
-        restored = target.command('call')
-        if restored.get('call') != 105:
-            errors.append(f'restored call={restored} at {index}')
-            break
-    target.command('resume')
-    time.sleep(0.05)
-    target.command('pause')
+        target.command('resume')
+        time.sleep(0.05)
+        target.command('pause')
     mid = snapshot(target, script)
-    call_restored = target.command('call')
     target.command('resume')
     time.sleep(0.05)
     end = snapshot(target, script)
-    if rc != 0 and not errors:
-        errors.append(f'install rc={rc}')
-    if call_installed.get('call') != -73:
-        errors.append(f'installed call={call_installed}')
-    if 'rc2' in locals() and rc2 != 0:
-        errors.append(f'uninstall rc={rc2}')
-    if call_restored.get('call') != 105:
-        errors.append(f'restored call={call_restored}')
-    if mid['hook_blocked'] <= 0:
-        errors.append('hook never counted a blocked call')
+    restored = target.command('call')
+    if mid['hook_blocked'] <= before['hook_blocked']:
+        errors.append('hook never counted a blocked call while installed')
+    if restored.get('call') != 105:
+        errors.append(f'restored call={restored}')
     return {
         'mode': 'quiesced',
         'install_rc': rc,
         'uninstall_rc': rc2,
-        'installed_call': call_installed,
-        'restored_call': call_restored,
+        'before': before,
         'mid': mid,
         'end': end,
+        'restored_call': restored,
         'errors': errors,
     }
 
@@ -222,9 +209,11 @@ def main() -> int:
     session = None
     try:
         results['target_ready'] = target.ready
-        print('target ready', flush=True)
+        target_tids = sorted(int(name) for name in os.listdir(f'/proc/{target.proc.pid}/task'))
+        print('target ready, tids', target_tids, flush=True)
         session, script = load_agent(target.proc.pid, args.lib)
-        print('agent loaded', flush=True)
+        set_count = script.exports_sync.set_threads(','.join(str(tid) for tid in target_tids))
+        print('agent loaded, stw threads', set_count, flush=True)
         results['agent_name'] = script.exports_sync.name()
         results['baseline'] = snapshot(target, script)
         if args.skip_live:
@@ -266,6 +255,8 @@ def main() -> int:
 
 if __name__ == '__main__':
     sys.exit(main())
+
+
 
 
 

@@ -90,6 +90,15 @@ LD_PRELOAD=$PWD/libvgpreload.so ./target
 
 结论：hot inline patch 需要**自实现 stop-the-world**（信号 handler 停车或外部 ptrace 挂起线程）；GOT 热路径可用 plthook；Frida `Thread.suspend` 在 17.26.2 不可用，停线程需在原生层实现。详见 `experiments/mature-hooks/README.md`。
 
+### STW 验证补充
+
+`experiments/mature-hooks/stw.c` 实现了“注入器预快照目标线程 → 信号 handler 停车 → epoch 释放 → PC 在补丁区重试”，接到 funchook 后：
+
+- funchook 无 STW：3×50 轮 live 安装/卸载 **2/3 次目标崩溃**；
+- funchook + STW：3×50 轮 **3/3 全部通过**，目标存活、blocked 持续增长、卸载后恢复 105；
+- 已知未解决：被 hook 函数从**目标主线程**直接调用会挂起（worker 线程正常），以及补丁期间新建线程不会被停；详见实验 README。
+
+
 
 
 
