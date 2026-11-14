@@ -15,6 +15,7 @@ import pytest
 
 from runtime.frida.build import build
 from runtime.frida.run import load_bundle
+from runtime.frida.shim import build as build_shim
 from tools.rulegen.ebpf_asm import assemble_text
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -520,3 +521,75 @@ def test_probe_accepts_float_and_double_actions(live):
     result = live.probe(config, catalog)
     assert result['ok'] is True
     assert result['errors'] == []
+
+PAIR_SHIM = {
+    'entry': '__vg_shim_pair',
+    'types': 'struct vg_pair { uint64_t a; double b; };',
+    'return_c': 'struct vg_pair',
+    'args_c': [
+        {'name': 'pair', 'type': 'struct vg_pair', 'kind': 'struct'},
+        {'name': 'scale', 'type': 'double', 'kind': 'double'},
+    ],
+    'block_c': 'struct vg_pair zero = {0}; return zero;',
+}
+
+
+def _shim_config(live, shim_path, bytecode=None):
+    config = copy.deepcopy(live.config)
+    config['maps'] = {}
+    config['observers'] = []
+    config['guards'] = [{
+        'id': 'pair_guard',
+        'module': live.config['guards'][0]['module'],
+        'symbol': 'fixture_pair',
+        'arg_types': ['pointer', 'double'],
+        'return_type': 'pointer',
+        'code': list(bytecode or BLOCK_BYTECODE),
+        'action_id': 'unused',
+        'shim': {'path': str(shim_path), 'entry': PAIR_SHIM['entry']},
+        'step_limit': 4096,
+    }]
+    return config
+
+
+def _shim_catalog(live):
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['unused'] = {'kind': 'return_null'}
+    return catalog
+
+
+def test_struct_by_value_and_sret_block(live):
+    shim = build_shim(PAIR_SHIM, live.package / 'shims')
+    assert live.install(_shim_config(live, shim), _shim_catalog(live))['guards'] == 1
+    reply = live.command('pair 5 2.5 2')
+    assert reply == {'a': 0, 'b': 0.0, 'body_calls': 0}
+
+
+def test_struct_by_value_and_sret_pass(live):
+    shim = build_shim(PAIR_SHIM, live.package / 'shims')
+    config = _shim_config(live, shim, PASS_BYTECODE)
+    assert live.install(config, _shim_catalog(live))['guards'] == 1
+    reply = live.command('pair 5 2.5 2')
+    assert reply['a'] == 6
+    assert abs(reply['b'] - 5.0) < 1e-9
+    assert reply['body_calls'] == 1
+
+
+def test_probe_accepts_shim_guard(live):
+    shim = build_shim(PAIR_SHIM, live.package / 'shims')
+    result = live.probe(_shim_config(live, shim), _shim_catalog(live))
+    assert result['ok'] is True
+    assert result['errors'] == []
+
+def test_probe_reports_variadic_when_declared(live):
+    config = copy.deepcopy(live.config)
+    config['guards'][0]['varargs'] = True
+    assert 'E_ARITY_UNSUPPORTED' in _probe_codes(live.probe(config))
+
+
+def test_install_rejects_variadic_when_declared(live):
+    config = copy.deepcopy(live.config)
+    config['guards'][0]['varargs'] = True
+    with pytest.raises(Exception, match='variadic'):
+        live.install(config)
+    assert live.script.exports_sync.status() == {'installed': False}

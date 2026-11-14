@@ -49,10 +49,24 @@ struct vg_slot {
     uint64_t end;
 };
 
+struct vg_pair {
+    uint64_t a;
+    double b;
+};
+
 ENTRY void fixture_finish(struct vg_slot *slot)
 {
     slot->start = 1;
     slot->end = 9;
+}
+
+ENTRY struct vg_pair fixture_pair(struct vg_pair pair, double scale)
+{
+    struct vg_pair result;
+    body_calls++;
+    result.a = pair.a + 1;
+    result.b = pair.b * scale;
+    return result;
 }
 
 int main(void)
@@ -74,6 +88,16 @@ int main(void)
             struct vg_slot slot = {0, 0};
             fixture_finish(&slot);
             printf("{\"end\":%" PRIu64 ",\"body_calls\":%u}\n", slot.end, body_calls);
+            continue;
+        }
+        if (strncmp(line, "pair", 4) == 0) {
+            uint64_t a = 0;
+            double b = 0.0, scale = 1.0;
+            sscanf(line, "pair %" SCNu64 " %lf %lf", &a, &b, &scale);
+            struct vg_pair input = {a, b};
+            struct vg_pair result = fixture_pair(input, scale);
+            printf("{\"a\":%" PRIu64 ",\"b\":%.17g,\"body_calls\":%u}\n",
+                   result.a, result.b, body_calls);
             continue;
         }
         if (strncmp(line, "addd", 4) == 0) {

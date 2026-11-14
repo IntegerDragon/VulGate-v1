@@ -32,6 +32,16 @@ def load_bundle(manifest: Path, catalog: Path) -> tuple[dict, dict]:
         if not code or len(code) > 32768 or len(code) % 8:
             raise ValueError('rule must contain 1..4096 eight-byte instructions')
         guard['code'] = list(code)
+        shim = guard.get('shim')
+        if shim is not None:
+            if not isinstance(shim, dict) or not isinstance(shim.get('path'), str) or \
+                    not isinstance(shim.get('entry'), str):
+                raise ValueError('invalid shim spec')
+            shim_path = (manifest.parent / shim['path']).resolve(strict=True)
+            expected = shim.get('sha256')
+            if expected is not None and hashlib.sha256(shim_path.read_bytes()).hexdigest() != expected:
+                raise ValueError('shim artifact mismatch: ' + str(shim_path))
+            guard['shim'] = {**shim, 'path': str(shim_path)}
     return config, actions
 
 

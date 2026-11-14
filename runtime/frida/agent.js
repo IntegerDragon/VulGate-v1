@@ -281,6 +281,10 @@ function probeBundle(config, catalog) {
             continue;
         }
         ids.add(spec.id);
+        if (spec.varargs) {
+            add('E_ARITY_UNSUPPORTED', 'variadic functions are not supported', spec.id);
+            continue;
+        }
         try {
             signature(spec);
         } catch (error) {
@@ -307,16 +311,30 @@ function probeBundle(config, catalog) {
             continue;
         }
         ids.add(spec.id);
+        if (spec.varargs) {
+            add('E_ARITY_UNSUPPORTED', 'variadic functions are not supported', spec.id);
+            continue;
+        }
         try {
             signature(spec);
         } catch (error) {
             add('E_ARITY_UNSUPPORTED', error.message, spec.id);
             continue;
         }
-        if (!['int', 'int64', 'pointer', 'void', 'float', 'double'].includes(spec.return_type)) {
-            add('E_RETURN_UNSUPPORTED', 'unsupported return ABI ' + String(spec.return_type), spec.id);
+        const isShim = spec.shim !== undefined;
+        if (isShim) {
+            if (!spec.shim || typeof spec.shim.path !== 'string' || typeof spec.shim.entry !== 'string') {
+                add('E_SHIM_INVALID', 'invalid shim spec', spec.id);
+            }
+            if ((spec.observations || []).length) {
+                add('E_SHIM_UNSUPPORTED', 'shim guards do not support observations', spec.id);
+            }
+        } else {
+            if (!['int', 'int64', 'pointer', 'void', 'float', 'double'].includes(spec.return_type)) {
+                add('E_RETURN_UNSUPPORTED', 'unsupported return ABI ' + String(spec.return_type), spec.id);
+            }
+            probeAction((catalog.actions || {})[spec.action_id], spec, add);
         }
-        probeAction((catalog.actions || {})[spec.action_id], spec, add);
         const code = spec.code;
         if (!Array.isArray(code) || code.length === 0 || code.length > 32768 || code.length % 8 !== 0 ||
             !code.every(x => Number.isInteger(x) && x >= 0 && x <= 255)) {
@@ -424,10 +442,20 @@ rpc.exports = {
             });
             const guards = config.guards.map(spec => {
                 const target = common(spec);
-                requireThat(['int', 'int64', 'pointer', 'void', 'float', 'double'].includes(spec.return_type),
-                    'unsupported return ABI');
-                const action = catalogAction(catalog.actions[spec.action_id], spec);
+                const isShim = spec.shim !== undefined;
+                let action = null;
+                if (isShim) {
+                    requireThat(spec.shim && typeof spec.shim.path === 'string' &&
+                        typeof spec.shim.entry === 'string', 'invalid shim spec');
+                    requireThat(!(spec.observations || []).length,
+                        'shim guards do not support observations');
+                } else {
+                    requireThat(['int', 'int64', 'pointer', 'void', 'float', 'double']
+                        .includes(spec.return_type), 'unsupported return ABI');
+                    action = catalogAction(catalog.actions[spec.action_id], spec);
+                }
                 requireThat(!('block_return' in spec) && !('action' in spec), 'guard must reference catalog action_id');
+                requireThat(!spec.varargs, 'variadic functions are not supported');
                 const slots = new Set();
                 for (const ref of spec.observations || []) {
                     requireThat(state.maps.has(ref.map), 'unknown guard observation map');
@@ -450,13 +478,16 @@ rpc.exports = {
                 const handle = create(bytes, spec.code.length);
                 requireThat(!handle.isNull(), 'VM rejected bytecode for ' + spec.id);
                 state.handles.push(handle);
-                const original = new SystemFunction(target, spec.return_type, spec.arg_types);
-                if (spec.vm_args) requireThat(spec.vm_args.length <= 6, 'too many VM argument bindings');
+                let original = null;
+                if (!isShim) {
+                    original = new SystemFunction(target, spec.return_type, spec.arg_types);
+                    if (spec.vm_args) requireThat(spec.vm_args.length <= 6, 'too many VM argument bindings');
+                }
                 const returnFilter = spec.return_offsets && new Set(spec.return_offsets.map(offset => {
                     requireThat(Number.isSafeInteger(offset) && offset >= 0, 'invalid return offset');
                     return Process.getModuleByName(spec.module).base.add(offset).toString();
                 }));
-                return {spec, target, action, handle, original, limit, returnFilter};
+                return {spec, target, action, handle, original, limit, returnFilter, isShim};
             });
             const recordObservation = (spec, args, context, threadId) => {
                         const map = state.maps.get(spec.map);
@@ -616,7 +647,21 @@ rpc.exports = {
                 if (anchorOffsets.length && anchored === 0)
                     spec.anchor_fallback_leave = true;
             }
-            for (const {spec, target, action, handle, original, limit, returnFilter} of guards) {
+            for (const {spec, target, action, handle, original, limit, returnFilter, isShim} of guards) {
+                if (isShim) {
+                    // Struct-by-value / sret signatures: the bundle ships a native
+                    // shim with the exact C signature; bind it to the VM and replace.
+                    const shimModule = Module.load(spec.shim.path);
+                    const bind = new NativeFunction(shimModule.getExportByName('__vg_shim_bind'),
+                        'void', ['pointer', 'uint', 'pointer']);
+                    const setOriginal = new NativeFunction(shimModule.getExportByName('__vg_shim_set_original'),
+                        'void', ['pointer']);
+                    bind(handle, limit, library.getExportByName('vg_run'));
+                    setOriginal(target);
+                    Interceptor.replace(target, shimModule.getExportByName(spec.shim.entry));
+                    state.hooks.push({address: target, shim: shimModule});
+                    continue;
+                }
                 const callback = new NativeCallback(function (...args) {
                     state.active++;
                     try {
