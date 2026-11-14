@@ -70,4 +70,15 @@ LD_PRELOAD=$PWD/libvgpreload.so ./target
 
 限制：只覆盖**经过动态符号表（PLT）**的调用；观察 map 目前仅支持简单 `key_arg`/`value_arg`（无 selector/组合 key）；静态链接目标不适用。Frida attach 路径仍然不支持多线程门控。
 
+## 2026-11-15 追加：Frida + 原生 CModule 路线可行（最小验证）
+
+`experiments/native-frida/probe.py` 验证了“Frida 注入 + 原生 CModule 执行门控 + 自有 inline patch/trampoline”：
+
+- CModule 原生函数在 4 个 pthread 上稳定执行；把 `runtime/vm.c` 嵌入 CModule（状态放栈上，CModule 数据段只读）后，BLOCK 4×50k 全部生效；
+- PASS 经自建 trampoline 调用真正原函数（原函数体执行），BLOCK 跳过；卸载恢复原始字节；
+- 实测安装约 8–9ms，运行期约 +0.1µs/call 量级（粗略计时，见 README）。
+
+缺口：prologue 重定位、patch 时暂停线程、W^X/加固环境、ARM64、与现有 manifest/生命周期集成。完整说明见 `experiments/native-frida/README.md`。
+
+
 
