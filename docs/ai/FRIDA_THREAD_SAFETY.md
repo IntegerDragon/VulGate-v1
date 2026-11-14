@@ -63,6 +63,11 @@ LD_PRELOAD=$PWD/libvgpreload.so ./target
 | BLOCK preload | `total=100, blocked=100, calls=0, out=0, output_result=-1`（含多字段写动作） |
 | PASS preload | `total=100, blocked=0, calls=101`（经 `dlsym(RTLD_NEXT)` 调用原函数） |
 
-限制：只覆盖**经过动态符号表（PLT）**的调用；当前 preload 不支持观察/map（后续补）；静态链接目标需改用偏移/内核方案。Frida attach 路径仍然不支持多线程门控。
+观察 map（thread-scoped）与递归也已验证：
+
+- 观察 wrapper 与 guard wrapper 共用原生 map，scope 取 `pthread_self()`；4 线程各自把值写入同一 key，只有值 > 2 的 2 个线程被 BLOCK（`checked_ok=50, checked_blocked=50`），说明线程作用域隔离生效；
+- `preload_recurse(4)` 在 PASS wrapper 下经“wrapper→real→递归 PLT→wrapper”返回 4，无崩溃。
+
+限制：只覆盖**经过动态符号表（PLT）**的调用；观察 map 目前仅支持简单 `key_arg`/`value_arg`（无 selector/组合 key）；静态链接目标不适用。Frida attach 路径仍然不支持多线程门控。
 
 

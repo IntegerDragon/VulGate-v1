@@ -63,7 +63,7 @@ PY
 
 "$PYTHON" -m runtime.frida.multiproc \
     --manifest "$OUT/manifest.json" --catalog "$OUT/actions.json" \
-    --spawn "$OUT/forker" --arg 3 --arg 80 --interval 0.02 --duration 3.5 \
+    --spawn "$OUT/forker" --arg 3 --arg 80 --role all --interval 0.02 --duration 3.5 \
     --summary "$OUT/summary.json" \
     > "$OUT/combined.jsonl" 2> "$OUT/multiproc.err"
 MP=$?

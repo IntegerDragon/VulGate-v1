@@ -1,4 +1,4 @@
-# 平台、权限与覆盖边界
+﻿# 平台、权限与覆盖边界
 
 日期：2026-11-15。本文记录补丁安装器在平台/架构/链接方式/语言上的实际支持范围、权限模型和交付方式。
 
@@ -25,7 +25,7 @@ python -m runtime.preload.build --manifest patch/manifest.json --catalog patch/a
 LD_PRELOAD=$PWD/build/libvgpreload.so ./target
 ```
 
-适用于可符号插入的动态链接目标（主程序经 PLT 调用共享库导出函数）。静态链接、内部直接调用、观察点/map 暂不支持，需要 Frida 路径或后续扩展。
+适用于可符号插入的动态链接目标（主程序经 PLT 调用共享库导出函数），支持 return/writes/errno 动作与线程作用域观察 map。静态链接、内部直接调用、selector 型观察暂不支持，需要 Frida 路径或后续扩展。
 
 
 ## 2. 偏移表（stripped 目标）
@@ -76,3 +76,4 @@ Frida 注入需要 `ptrace` 权限：
 - ARM64、JIT 语言；
 - 非托管启动且无 `CAP_SYS_PTRACE` 的注入；
 - 结构体/sret 之外的自定义 ABI（C++ 异常、变参明确拒绝）。
+

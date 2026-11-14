@@ -1,4 +1,4 @@
-# 部署示例
+﻿# 部署示例
 
 `vulgate-frida.service` 是一个 systemd 单元示例：
 
@@ -36,3 +36,4 @@ LD_PRELOAD=/opt/vulgate/libvgpreload.so /usr/sbin/target ...
 
 离线/签名：给 manifest 配置 `bundle_version`，用 `bundle.sign_bundle()` 生成 `.sig`，并在启动环境设置
 `VULGATE_BUNDLE_KEY`，launcher 会在 `load_bundle` 阶段强制验签；`bundle_digest` 会写入安装回执与事件。
+

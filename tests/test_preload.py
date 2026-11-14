@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from runtime.preload import build as preload_build  # noqa: E402
+from tools.rulegen.ebpf_asm import assemble_text  # noqa: E402
 
 FIXTURES = ROOT / 'tests' / 'workloads' / 'userspace' / 'preload'
 LINUX = sys.platform.startswith('linux')
@@ -22,8 +23,10 @@ PASS = [0xB7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
 
 
-def _manifest(guards: list[dict]) -> dict:
-    return {'schema': 1, 'bridge': '', 'maps': {}, 'observers': [], 'guards': guards}
+def _manifest(guards: list[dict], maps: dict | None = None,
+              observers: list[dict] | None = None) -> dict:
+    return {'schema': 1, 'bridge': '', 'maps': maps or {},
+            'observers': observers or [], 'guards': guards}
 
 
 def _block_guard(symbol: str, args: list[str], ret: str, action: str,
@@ -33,10 +36,12 @@ def _block_guard(symbol: str, args: list[str], ret: str, action: str,
             'action_id': action, 'step_limit': 4096}
 
 
-def _write_bundle(tmp_path: Path, guards: list[dict], actions: dict) -> tuple[Path, Path]:
+def _write_bundle(tmp_path: Path, guards: list[dict], actions: dict,
+                  maps: dict | None = None,
+                  observers: list[dict] | None = None) -> tuple[Path, Path]:
     manifest = tmp_path / 'manifest.json'
     catalog = tmp_path / 'actions.json'
-    manifest.write_text(json.dumps(_manifest(guards)), encoding='utf-8')
+    manifest.write_text(json.dumps(_manifest(guards, maps, observers)), encoding='utf-8')
     catalog.write_text(json.dumps({'schema': 1, 'actions': actions}), encoding='utf-8')
     return manifest, catalog
 
@@ -95,10 +100,12 @@ def test_preload_blocks_all_threads(tmp_path: Path) -> None:
     library = preload_build.build(manifest, catalog, tmp_path / 'libvgpreload.so')
     baseline = _run(app, None)
     assert baseline == {'total': 100, 'blocked': 0, 'calls': 101,
-                        'out': 5, 'output_result': 0}
+                        'out': 5, 'output_result': 0,
+                        'checked_ok': 100, 'checked_blocked': 0, 'recurse': 4}
     blocked = _run(app, library)
     assert blocked == {'total': 100, 'blocked': 100, 'calls': 0,
-                       'out': 0, 'output_result': -1}
+                       'out': 0, 'output_result': -1,
+                       'checked_ok': 100, 'checked_blocked': 0, 'recurse': 4}
 
 
 @_skip
@@ -114,6 +121,60 @@ def test_preload_pass_calls_real_symbol(tmp_path: Path) -> None:
     library = preload_build.build(manifest, catalog, tmp_path / 'libvgpreload.so')
     passed = _run(app, library)
     assert passed == {'total': 100, 'blocked': 0, 'calls': 101,
-                      'out': 5, 'output_result': 0}
+                      'out': 5, 'output_result': 0,
+                      'checked_ok': 100, 'checked_blocked': 0, 'recurse': 4}
 
+
+
+
+THREAD_SCOPE = assemble_text(
+    'mov64 r1, 0\n'
+    'call get_reg\n'
+    'mov64x r6, r0\n'
+    'mov64 r7, 2\n'
+    'raw 0x2d, 0x76, 2, 0\n'
+    'mov64 r0, pass\n'
+    'exit\n'
+    'mov64 r0, block\n'
+    'exit\n'
+)
+
+
+@_skip
+def test_preload_thread_scoped_observation(tmp_path: Path) -> None:
+    app = _build_fixture(tmp_path)
+    observer = {
+        'id': 'observe_limit',
+        'symbol': 'preload_observe',
+        'arg_types': ['int', 'int'],
+        'return_type': 'int',
+        'map': 'limits',
+        'operation': 'set',
+        'key_arg': 0,
+        'value_arg': 1,
+    }
+    guard = _block_guard('preload_checked', ['int'], 'int', 'block', list(THREAD_SCOPE))
+    guard['observations'] = [{'map': 'limits', 'key_arg': 0, 'slot': 0}]
+    manifest, catalog = _write_bundle(
+        tmp_path, [guard],
+        {'block': {'kind': 'return_int', 'value': -73}},
+        maps={'limits': {'capacity': 8, 'thread_scoped': True}},
+        observers=[observer])
+    library = preload_build.build(manifest, catalog, tmp_path / 'libvgpreload.so')
+    result = _run(app, library)
+    assert result['checked_ok'] == 50
+    assert result['checked_blocked'] == 50
+    assert result['recurse'] == 4
+
+
+@_skip
+def test_preload_recursive_pass(tmp_path: Path) -> None:
+    app = _build_fixture(tmp_path)
+    guard = _block_guard('preload_recurse', ['int'], 'int', 'pass', PASS)
+    manifest, catalog = _write_bundle(
+        tmp_path, [guard], {'pass': {'kind': 'return_int', 'value': -1}})
+    library = preload_build.build(manifest, catalog, tmp_path / 'libvgpreload.so')
+    result = _run(app, library)
+    assert result['recurse'] == 4
+    assert result['checked_ok'] == 100
 

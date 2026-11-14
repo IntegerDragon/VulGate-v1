@@ -148,18 +148,19 @@
 - 验收：`--role workers` 只装 3 个 worker（master 跳过）；`--role all` 装 1 master + 3 worker；respawn 模式下顺序出现的两个 worker 都被重新安装；延迟阈值能标记 `late_installs`。回归脚本：`tests/workloads/userspace/frida/verify_multiproc_roles.sh`。
 - 限制：helper 识别依赖命令行标记；“首请求前”只测量不强制；fork 不 exec 的子进程继承 inline hook 的 Frida 限制仍在（本实现只逐进程安装新进程）。
 
-### WP6 线程与并发安全（P0）—— 部分完成（Frida attach 路径受限；preload 路径已支持多线程门控）
+### WP6 线程与并发安全（P0）—— 完成（preload 模式；Frida attach 路径限制已文档化）
 
 已实现并验证：
 - **卸载静默**：`runtime/frida/lifecycle.py` 在卸载时轮询 `callbacks active`，等回调退出后再撤销；`run.py`/`multiproc.py` 的卸载路径统一使用它。单元测试覆盖重试、超时、异常传播。
-- **线程作用域观测**：`Interceptor.attach` 观察点在 pthread 上工作正常；线程作用域 map 的每条记录带独立 scope，已用 2 线程 telemetry 测试验证“每线程一个值”。
-- **重入保护**：agent 增加每线程重入深度，重入时直接转发原函数（不再次进 VM）；该逻辑已实现，但在 replace 回调递归场景下无法可靠验证（见限制）。
-- **多线程门控（LD_PRELOAD 模式）**：`runtime/preload/build.py` 生成静态链接 `runtime/vm.c` 的原生库，天然线程安全；实测 4 线程 × 25 次调用全部 BLOCK、PASS 经 `dlsym(RTLD_NEXT)` 调原函数、动作写/errno 生效（`tests/test_preload.py`，105 passed）。
+- **线程作用域观测（Frida attach）**：观察点在 pthread 上工作正常；2 线程 telemetry 测试验证“每线程一个 scope/值”。
+- **多线程门控（LD_PRELOAD 模式）**：`runtime/preload/build.py` 生成静态链接 `runtime/vm.c` 的原生库，天然线程安全；4 线程 × 25 次调用全部 BLOCK；PASS 经 `dlsym(RTLD_NEXT)` 调原函数；动作写/errno 生效（`tests/test_preload.py`，107 passed）。
+- **map 线程作用域（preload）**：观察 wrapper 与 guard wrapper 共用原生 map，scope 取 `pthread_self()`；实测 thread-scoped map 下每线程独立值：2 线程超限被 BLOCK、2 线程放行（`checked_ok=50, checked_blocked=50`，global 语义下会不同）。
+- **重入保护**：preload 模式下递归调用经 wrapper→real→递归 PLT 回到 wrapper，`PASS` 规则下递归结果正确（`preload_recurse(4)=4`，无崩溃）；Frida JS 路径保留每线程重入深度实现，但受 replace 回调限制未做递归压测。
 
-阻塞项（详见 `docs/ai/FRIDA_THREAD_SAFETY.md`）：
-- Frida 17.26.2 的 `Interceptor.replace` + `NativeCallback` 在非主线程上执行稍复杂 JS（分配、send、Frida API）会 SIGSEGV；仅常量返回可用。
-- 原生 shim（含静态链接 `runtime/vm.c`）在 pthread 替换回调中调用 VM 仍挂起；`NativeCallback` 不支持 scheduling 选项；attach 改写 rip/rsp 不生效。
-- 因此：**Frida attach 路径的多线程门控不可用**；多线程目标只能走 LD_PRELOAD 模式，且该模式只覆盖 PLT 符号、暂不支持观察/map。完成 WP6 剩余项需在 preload 后端实现观察 map 与重入压测。
+Frida attach 路径限制（详见 `docs/ai/FRIDA_THREAD_SAFETY.md`）：
+- 非主线程的 replace 回调执行稍复杂 JS/VM 会崩溃或挂起；原生 shim（含静态链接 VM）同样挂起。
+- 因此 **Frida attach 模式仅支持主线程/单线程目标**；多线程目标使用 LD_PRELOAD 模式。
+- preload 模式只覆盖经过动态符号表（PLT）的调用；观察 map 支持简单 `key_arg`/`value_arg`（无 selector）；静态链接目标不适用。
 
 ### WP7 生命周期与失败安全（P1）—— 已完成
 
@@ -218,7 +219,7 @@
 | WP3 | 完成：多字段写、输出参数初始化、`calls` 清理/组合动作、`once` 幂等、写前范围检查与诊断、probe 校验 |
 | WP4 | 完成：manifest `smoke`（signal/exec/none）、安装后自动触发、`stats()` 计数、`installed_verified`/`installed_unverified`/`failed`、失败卸载与 `--smoke-warn-only` |
 | WP5 | 完成：角色推断与 `--role`、spawn 宽限与 master 跳过、安装延迟测量、失败退避重试、starttime pid 复用检测、重启重挂；回归脚本已提交 |
-| WP6 | 部分：卸载静默、线程作用域观测已验证；**多线程门控经 LD_PRELOAD 模式可用**（4 线程实测）；Frida attach 路径不支持多线程，preload 的观察/map 待补；证据见 `FRIDA_THREAD_SAFETY.md` |
+| WP6 | 完成（preload 模式）：卸载静默、多线程 BLOCK、线程作用域 map（50/50 实测）、递归 PASS；Frida attach 路径仅单线程/主线程，限制已文档化 |
 | WP7 | 完成：进程内原子回滚、卸载 barrier/超时、崩溃隔离、fail-fast 回滚、starttime+exe 的替换检测；回归脚本已提交 |
 | WP8 | 完成：统一事件流、每进程 metrics、滑动窗口熔断与自动卸载、退出码 10；单测与 CLI 端到端验证 |
 | WP9 | 完成（文档 + 偏移表工具）：x86-64 实测；stripped 偏移表实测；ARM64/静态链接/多线程明确列为未支持 |
