@@ -133,16 +133,78 @@ function catalogAction(action, spec) {
         requireThat(write.symbol ? write.type === 'pointer' : Number.isSafeInteger(fixed), 'invalid fixed field value');
         return {arg: write.arg, offset: write.offset, type: write.type, value: fixed};
     });
+    const calls = (action.calls || []).map(call => {
+        requireThat(call && typeof call.module === 'string' && typeof call.symbol === 'string',
+            'invalid catalog call');
+        const module = Process.getModuleByName(call.module);
+        const argSpecs = Array.isArray(call.args) ? call.args : [];
+        requireThat(argSpecs.length <= 6, 'too many catalog call arguments');
+        const resolved = argSpecs.map(argSpec => {
+            requireThat(argSpec && typeof argSpec === 'object', 'invalid catalog call argument');
+            if ('constant' in argSpec) {
+                requireThat(Number.isSafeInteger(argSpec.constant), 'invalid catalog call constant');
+                return {kind: 'constant', value: argSpec.constant};
+            }
+            if ('string' in argSpec) {
+                requireThat(typeof argSpec.string === 'string' && argSpec.string.length <= 4096,
+                    'invalid catalog call string');
+                return {kind: 'pointer', value: Memory.allocUtf8String(argSpec.string)};
+            }
+            requireThat('arg' in argSpec, 'invalid catalog call argument');
+            index(argSpec.arg, spec.arg_types.length, 'invalid catalog call argument');
+            return {kind: 'arg', index: argSpec.arg, pointer: spec.arg_types[argSpec.arg] === 'pointer'};
+        });
+        const types = resolved.map(item =>
+            item.kind === 'pointer' || item.pointer ? 'pointer' : 'uint64');
+        return {fn: new NativeFunction(module.getExportByName(call.symbol), 'void', types),
+            args: resolved};
+    });
+    requireThat(action.once === undefined || typeof action.once === 'boolean',
+        'catalog once must be a boolean');
     const apply = function (args) {
         for (const write of writes) {
-            const destination = args[write.arg].add(write.offset);
-            if (write.type === 'pointer') destination.writePointer(ptr(write.value));
-            else if (write.type === 'u64') destination.writeU64(uint64(write.value));
-            else destination.writeU32(write.value);
+            const base = args[write.arg];
+            const width = write.type === 'u32' ? 4 : 8;
+            const address = base ? base.add(write.offset) : null;
+            const range = address ? Process.findRangeByAddress(address) : null;
+            const writable = range !== null && range.protection.includes('w') &&
+                address.add(width) <= range.base.add(range.size);
+            if (!writable) {
+                send({event: 'diagnostic', hook: spec.id,
+                    reason: 'action_write_failed:' + write.arg + '@' + write.offset});
+                continue;
+            }
+            try {
+                if (write.type === 'pointer') address.writePointer(ptr(write.value));
+                else if (write.type === 'u64') address.writeU64(uint64(write.value));
+                else address.writeU32(write.value);
+            } catch (error) {
+                send({event: 'diagnostic', hook: spec.id,
+                    reason: 'action_write_failed:' + write.arg + '@' + write.offset});
+            }
+        }
+        if (!apply.once || !apply.done) {
+            for (const call of calls) {
+                try {
+                    const argv = call.args.map(item => {
+                        if (item.kind === 'constant') return uint64(item.value);
+                        if (item.kind === 'pointer') return item.value;
+                        return item.pointer ? args[item.index]
+                            : bits(args[item.index], spec.arg_types[item.index]);
+                    });
+                    call.fn(...argv);
+                } catch (error) {
+                    send({event: 'diagnostic', hook: spec.id,
+                        reason: 'action_call_failed:' + String(error)});
+                }
+            }
+            if (apply.once) apply.done = true;
         }
         return value;
     };
     if (action.errno !== undefined) apply.errno = action.errno;
+    apply.once = action.once === true;
+    apply.done = false;
     return apply;
 }
 
@@ -196,6 +258,40 @@ function probeAction(action, spec, add) {
             Number.isSafeInteger(write.offset) && write.offset >= 0 &&
             ['u32', 'u64', 'pointer'].includes(write.type);
         if (!valid) add('E_ACTION_WRITE_INVALID', 'invalid action field write', spec.id);
+    }
+    if (action.once !== undefined && typeof action.once !== 'boolean')
+        add('E_ACTION_CALL_INVALID', 'action once must be a boolean', spec.id);
+    for (const call of action.calls || []) {
+        if (!call || typeof call.module !== 'string' || typeof call.symbol !== 'string') {
+            add('E_ACTION_CALL_INVALID', 'invalid catalog call', spec.id);
+            continue;
+        }
+        try {
+            Process.getModuleByName(call.module).getExportByName(call.symbol);
+        } catch (error) {
+            add('E_ACTION_CALL_INVALID', 'call target not resolvable: ' + call.module + '!' + call.symbol,
+                spec.id);
+        }
+        for (const argSpec of call.args || []) {
+            if (!argSpec || typeof argSpec !== 'object') {
+                add('E_ACTION_CALL_INVALID', 'invalid catalog call argument', spec.id);
+                continue;
+            }
+            if ('arg' in argSpec) {
+                if (!(Number.isInteger(argSpec.arg) && argSpec.arg >= 0 &&
+                    argSpec.arg < (spec.arg_types || []).length)) {
+                    add('E_ACTION_CALL_INVALID', 'call argument index out of range', spec.id);
+                }
+            } else if ('constant' in argSpec) {
+                if (!Number.isSafeInteger(argSpec.constant))
+                    add('E_ACTION_CALL_INVALID', 'call constant must be an integer', spec.id);
+            } else if ('string' in argSpec) {
+                if (typeof argSpec.string !== 'string' || argSpec.string.length > 4096)
+                    add('E_ACTION_CALL_INVALID', 'invalid call string', spec.id);
+            } else {
+                add('E_ACTION_CALL_INVALID', 'invalid catalog call argument', spec.id);
+            }
+        }
     }
 }
 

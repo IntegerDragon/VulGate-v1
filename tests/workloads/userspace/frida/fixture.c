@@ -13,6 +13,7 @@
 
 static unsigned body_calls;
 static volatile uint64_t observed_sink;
+static int marked;
 
 ENTRY void fixture_observe(uint64_t key, unsigned limit)
 {
@@ -43,6 +44,9 @@ ENTRY void fixture_void(uint64_t *value) { body_calls++; *value = 123; }
 ENTRY double fixture_addd(double a, double b) { body_calls++; return a + b; }
 ENTRY float fixture_mulf(float a, float b) { body_calls++; return a * b; }
 ENTRY int fixture_errno_set(int code) { body_calls++; errno = code; return 7; }
+ENTRY int fixture_output(uint64_t *out) { body_calls++; if (out) *out = 5; return 0; }
+ENTRY int fixture_mark(int value) { marked += value; return value; }
+ENTRY int fixture_marks(void) { return marked; }
 
 struct vg_slot {
     uint64_t start;
@@ -88,6 +92,29 @@ int main(void)
             struct vg_slot slot = {0, 0};
             fixture_finish(&slot);
             printf("{\"end\":%" PRIu64 ",\"body_calls\":%u}\n", slot.end, body_calls);
+            continue;
+        }
+        if (strncmp(line, "output", 6) == 0) {
+            uint64_t output = 123;
+            int result = fixture_output(&output);
+            printf("{\"result\":%d,\"out\":%" PRIu64 ",\"body_calls\":%u}\n",
+                   result, output, body_calls);
+            continue;
+        }
+        if (strncmp(line, "slot", 4) == 0) {
+            struct vg_slot slot = {0, 0};
+            fixture_finish(&slot);
+            printf("{\"start\":%" PRIu64 ",\"end\":%" PRIu64 ",\"body_calls\":%u}\n",
+                   slot.start, slot.end, body_calls);
+            continue;
+        }
+        if (strncmp(line, "voidnull", 8) == 0) {
+            fixture_void(NULL);
+            printf("{\"body_calls\":%u}\n", body_calls);
+            continue;
+        }
+        if (strncmp(line, "marks", 5) == 0) {
+            printf("{\"marked\":%d,\"body_calls\":%u}\n", fixture_marks(), body_calls);
             continue;
         }
         if (strncmp(line, "pair", 4) == 0) {

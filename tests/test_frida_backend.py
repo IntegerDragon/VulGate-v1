@@ -593,3 +593,98 @@ def test_install_rejects_variadic_when_declared(live):
     with pytest.raises(Exception, match='variadic'):
         live.install(config)
     assert live.script.exports_sync.status() == {'installed': False}
+
+def _action_config(live, symbol, arg_types, return_type, action_id, code=None):
+    config = copy.deepcopy(live.config)
+    config['maps'] = {}
+    config['observers'] = []
+    config['guards'] = [{
+        'id': 'action_guard',
+        'module': live.config['guards'][0]['module'],
+        'symbol': symbol,
+        'arg_types': arg_types,
+        'return_type': return_type,
+        'code': list(code or BLOCK_BYTECODE),
+        'action_id': action_id,
+        'step_limit': 4096,
+    }]
+    return config
+
+
+def test_action_initializes_output_pointer(live):
+    config = _action_config(live, 'fixture_output', ['pointer'], 'int', 'zero_out')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['zero_out'] = {
+        'kind': 'return_int', 'value': -1,
+        'writes': [{'arg': 0, 'offset': 0, 'type': 'pointer', 'value': 0}],
+    }
+    assert live.install(config, catalog)['guards'] == 1
+    assert live.command('output') == {'result': -1, 'out': 0, 'body_calls': 0}
+
+
+def test_action_writes_multiple_fields(live):
+    config = _action_config(live, 'fixture_finish', ['pointer'], 'void', 'fill_slot')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['fill_slot'] = {
+        'kind': 'return_void',
+        'writes': [{'arg': 0, 'offset': 0, 'type': 'u64', 'value': 11},
+                   {'arg': 0, 'offset': 8, 'type': 'u64', 'value': 22}],
+    }
+    assert live.install(config, catalog)['guards'] == 1
+    assert live.command('slot') == {'start': 11, 'end': 22, 'body_calls': 0}
+
+
+def test_action_calls_cleanup_function(live):
+    config = _action_config(live, 'fixture_target', ['uint64', 'uint'], 'int', 'cleanup')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['cleanup'] = {
+        'kind': 'return_int', 'value': -73,
+        'calls': [{'module': live.config['guards'][0]['module'], 'symbol': 'fixture_mark',
+                   'args': [{'constant': 7}]}],
+    }
+    assert live.install(config, catalog)['guards'] == 1
+    assert live.command('call 1 5')['result'] == -73
+    assert live.command('marks') == {'marked': 7, 'body_calls': 0}
+
+
+def test_action_once_runs_side_effects_once(live):
+    config = _action_config(live, 'fixture_target', ['uint64', 'uint'], 'int', 'cleanup_once')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['cleanup_once'] = {
+        'kind': 'return_int', 'value': -73, 'once': True,
+        'calls': [{'module': live.config['guards'][0]['module'], 'symbol': 'fixture_mark',
+                   'args': [{'constant': 7}]}],
+    }
+    assert live.install(config, catalog)['guards'] == 1
+    assert live.command('call 1 5')['result'] == -73
+    assert live.command('call 1 5')['result'] == -73
+    assert live.command('marks') == {'marked': 7, 'body_calls': 0}
+
+
+def test_action_write_to_null_is_reported(live):
+    config = _action_config(live, 'fixture_void', ['pointer'], 'void', 'null_write')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['null_write'] = {
+        'kind': 'return_void',
+        'writes': [{'arg': 0, 'offset': 0, 'type': 'u64', 'value': 1}],
+    }
+    assert live.install(config, catalog)['guards'] == 1
+    assert live.command('voidnull') == {'body_calls': 0}
+    deadline = time.monotonic() + 5
+    observed = None
+    while time.monotonic() < deadline and observed is None:
+        message = live.messages.get(timeout=max(0.01, deadline - time.monotonic()))
+        payload = message.get('payload') or {}
+        if payload.get('event') == 'diagnostic' and str(payload.get('reason', '')).startswith('action_write_failed'):
+            observed = payload
+    assert observed is not None
+
+
+def test_probe_reports_invalid_action_call(live):
+    config = copy.deepcopy(live.config)
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['fixture_reject'] = {
+        'kind': 'return_int', 'value': 0,
+        'calls': [{'module': 'libc.so.6', 'symbol': 'vg_missing_symbol', 'args': []}],
+    }
+    assert 'E_ACTION_CALL_INVALID' in _probe_codes(live.probe(config, catalog))

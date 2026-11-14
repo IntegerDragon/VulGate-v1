@@ -76,6 +76,7 @@
 | `E_ACTION_MISSING` | `action_id` 不在动作目录 |
 | `E_ACTION_ABI_MISMATCH` | 动作类型与返回类型/参数类型不匹配 |
 | `E_ACTION_WRITE_INVALID` | 动作写字段的目标参数不是 pointer 或偏移/宽度非法 |
+| `E_ACTION_CALL_INVALID` | 动作附带调用（`calls`）的 module/symbol/参数/once 非法或不可解析 |
 | `E_RULE_INVALID` | 字节码为空、长度非 8 倍数、超上限、VM 校验拒绝 |
 | `E_MAP_MISSING` | guard/observer 引用了不存在的 map |
 | `E_OBSERVER_INVALID` | 观测点操作/键/值声明非法 |
@@ -115,15 +116,16 @@
 - 已知限制：shim guard 目前不发送 decision 事件、不支持 observers/maps（安装期拒绝）；shim 模块无法卸载（Frida 限制），卸载只恢复原函数。
 - 验收：int/int64/pointer/void/float/double 双向、errno 透传/设置、结构体按值 + sret 的 BLOCK/PASS、变参拒绝，均在 WSL 实测通过。
 
-### WP3 动作目录补全（P0）
+### WP3 动作目录补全（P0）—— 已完成
 
-- 返回类：已有 4 类；
-- 输出参数初始化：置 NULL、置 0、置空串，多参数；
-- 多字段写：已有单字段；扩展到同一动作多个写入、写入前安全检查（非空/可写/宽度）；
-- 资源清理：解锁、关 fd、释放/减引用（需逐应用定义，动作目录声明）；
-- 调用既有错误路径：跳转到函数内已有错误标签（可行则做，不可行则明确不支持）；
-- 幂等性：同一函数重复 BLOCK 不产生累计副作用；
-- 验收：每类动作有单元测试 + 安装后触发测试；动作写越界/空指针时行为是拒绝安装（`E_ACTION_WRITE_INVALID`）而不是运行时崩溃。
+- 返回类：`return_int/int64/void/null/string/float/double`，均可附带 `errno`。
+- 输出参数初始化：`writes` 支持 pointer 类型写 `value: 0`（置 NULL）、`u32/u64` 写 0/常量，可用于初始化多个输出参数。
+- 多字段写：同一动作可声明多个 `writes`，按声明顺序执行。
+- 资源清理/组合动作：新增 `calls`：`[{module, symbol, args: [{arg: i} | {constant: n} | {string: "..."}]}]`；安装期解析 module/symbol 并构造 `NativeFunction`，BLOCK 时先写字段再调用，最后返回动作值并写 errno。
+- 幂等：动作可声明 `once: true`，副作用（`calls`）每个 hook 只执行一次，返回值仍每次都生效；字段写天然幂等。
+- 写前安全检查：运行期对每个 `writes` 检查目标指针非空、地址落在 `w` 权限的映射内、`offset+width` 不越界；失败时跳过该写并发送 `action_write_failed:<arg>@<offset>` 诊断，不崩溃。`calls` 异常发送 `action_call_failed` 诊断。
+- probe 校验：`calls` 的 module/symbol 可解析、参数引用/常量/字符串合法、`once` 为布尔；否则 `E_ACTION_CALL_INVALID` / `E_ACTION_WRITE_INVALID`。
+- 验收：输出指针置 NULL、多字段写、清理函数调用、once 幂等、NULL 目标写失败诊断、probe 非法调用拒绝，均在 WSL 实测通过。
 
 ### WP4 生效自证（P0）
 
@@ -200,7 +202,7 @@
 |---|---|
 | WP1 | 部分：agent 安装前会整体解析并拒绝（已有原子性），但无 `probe` RPC、无错误码体系、无 `--check-only` |
 | WP2 | 完成：标量+float/double、errno、结构体按值/sret（原生 shim）、变参拒绝；shim guard 不支持 observers/maps 与 decision 事件（安装期限制） |
-| WP3 | 部分：四类返回 + 单字段写；缺输出参数初始化/资源清理/组合/幂等 |
+| WP3 | 完成：多字段写、输出参数初始化、`calls` 清理/组合动作、`once` 幂等、写前范围检查与诊断、probe 校验 |
 | WP4 | 缺：无 smoke、无 `installed_verified` 区分 |
 | WP5 | 部分：multiproc 扫描/跟随/逐进程安装已实现并验证；缺角色识别与首请求窗口 |
 | WP6 | 未知：无并发压测，桥状态线程安全未验证 |
