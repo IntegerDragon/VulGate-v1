@@ -96,6 +96,9 @@ python -m runtime.frida.multiproc --manifest M --catalog C --pid 1234 --pid 1235
 ```
 
 - 每个进程独立会话、独立字节码句柄、独立安装回执；结束时打印 `summary` 并卸载。
+- 角色：默认 `--role workers`，按进程树推断 master/worker，master 跳过；`--role all|master|helpers` 可选，`--helper-arg` 标记 helper 进程。
+- spawn 模式用 `--spawn-grace`（默认 0.3s）等 master fork 出 worker；单进程目标在宽限期后按 worker 安装。
+- 每次安装输出 `latency_ms` 与 `window_exceeded`；`--max-install-latency-ms` 设阈值，失败按 `--retry-delay`/`--max-attempts` 退避重试，pid 复用按 starttime 检测并重装。
 - 进程权限：Linux Yama `ptrace_scope=1` 时只能注入本进程启动的进程树；注入已运行进程需要 root 或 `CAP_SYS_PTRACE`。
 - fork 后不 exec 的子进程会继承 inline hook，Frida 不保证继承后的钩子可用；这类目标应由 launcher 启动并在 worker 出现时逐个安装，或由目标 exec 出 worker。
 - 回归脚本：`bash tests/workloads/userspace/frida/verify_multiproc.sh`（Linux，需 frida Python 模块）。

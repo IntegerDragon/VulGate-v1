@@ -137,14 +137,16 @@
 - 限制：shim guard 尚无决策计数（smoke 无法验证 shim 目标）；`exec` 触发命令由补丁作者负责幂等与安全。
 - 验收：signal 触发验证 guard、未声明 smoke 记 unverified、PASS-only 补丁被判 failed、CLI 与多进程路径均输出 smoke 状态，均在 WSL 实测通过。
 
-### WP5 多进程与角色（P0）
+### WP5 多进程与角色（P0）—— 已完成
 
-- 角色识别：master / worker / helper（ppid、命令行、进程树层级、可配置规则）；
-- 默认只装 worker；master 跳过并记录；
-- 首请求前窗口：暂缓 worker 请求入口（如临时挂 accept/read 入口）→ 安装完成 → 放行；或快速扫描并记录窗口长度；
-- fork 不 exec 场景：不依赖继承 hook，逐进程安装；检测已继承的 Frida 状态并拒绝/重装；
-- 重启重挂：新 worker 自动安装，带退避与上限；pid 复用检测；
-- 验收：fork 型 master/worker 测试程序（4 worker）全部安装、master 不装；首请求前完成或窗口有记录；kill worker 后新 worker 自动安装。
+- **角色推断**（`classify_roles`）：在同一可执行的匹配进程树里，有子进程的根是 master，其余是 worker；`--helper-arg` 指定的命令行子串把进程标成 helper；多个独立 prefork 实例各自识别出 master；单进程应用本身按 worker 处理。
+- **选择**：`--role workers|all|master|helpers`（默认 `workers`）；`--pid` 显式指定时不做角色过滤。
+- **spawn 模式**：先用 `--spawn-grace`（默认 0.3s）等待 master fork 出 worker；`--role workers` 时跳过 master 但在首轮扫描后恢复它以便 fork；若宽限期内仍无子进程（单进程应用），把被启动进程按 worker 安装。
+- **安装窗口**：每次安装记录 `latency_ms`（从首次发现到安装完成）与 `window_exceeded`；`--max-install-latency-ms` 超过阈值时置位并在 summary 累计 `late_installs`。这是**测量**，不是“首请求前完成”的硬保证。
+- **重启/重挂**：扫描循环持续安装新出现的进程；`/proc/<pid>/stat` 的 starttime 变化视为 pid 复用（发出 `replaced` 事件并重装）；安装失败按 `--retry-delay`（默认 2s）与 `--max-attempts`（默认 3）退避重试。
+- **权限边界**：Yama `ptrace_scope=1` 下只能注入本进程（或 spawn 树）的后代；注入无关进程需要 root/CAP_SYS_PTRACE。
+- 验收：`--role workers` 只装 3 个 worker（master 跳过）；`--role all` 装 1 master + 3 worker；respawn 模式下顺序出现的两个 worker 都被重新安装；延迟阈值能标记 `late_installs`。回归脚本：`tests/workloads/userspace/frida/verify_multiproc_roles.sh`。
+- 限制：helper 识别依赖命令行标记；“首请求前”只测量不强制；fork 不 exec 的子进程继承 inline hook 的 Frida 限制仍在（本实现只逐进程安装新进程）。
 
 ### WP6 线程与并发安全（P0）
 
@@ -207,7 +209,7 @@
 | WP2 | 完成：标量+float/double、errno、结构体按值/sret（原生 shim）、变参拒绝；shim guard 不支持 observers/maps 与 decision 事件（安装期限制） |
 | WP3 | 完成：多字段写、输出参数初始化、`calls` 清理/组合动作、`once` 幂等、写前范围检查与诊断、probe 校验 |
 | WP4 | 完成：manifest `smoke`（signal/exec/none）、安装后自动触发、`stats()` 计数、`installed_verified`/`installed_unverified`/`failed`、失败卸载与 `--smoke-warn-only` |
-| WP5 | 部分：multiproc 扫描/跟随/逐进程安装已实现并验证；缺角色识别与首请求窗口 |
+| WP5 | 完成：角色推断与 `--role`、spawn 宽限与 master 跳过、安装延迟测量、失败退避重试、starttime pid 复用检测、重启重挂；回归脚本已提交 |
 | WP6 | 未知：无并发压测，桥状态线程安全未验证 |
 | WP7 | 部分：agent 安装失败回滚；缺卸载静默/崩溃隔离/pid 复用 |
 | WP8 | 部分：每进程 decisions/blocks 计数；缺统一指标/熔断/审计 |

@@ -1,10 +1,15 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Install one VulGate bundle into every matching userspace process.
 
 Unlike run.py (a single --pid or one --spawn), this launcher keeps scanning for
 new processes that match the requested target (executable path or name), so a
 pre-forking server (nginx/httpd/PHP-FPM) gets the same patch in every worker.
 Each process receives its own Frida session and its own installation receipt.
+
+Process roles are inferred from the process tree: a single matching root with
+matching children becomes master + workers (helpers are recognised by a command
+line marker). --role selects which class receives the bundle, and every install
+reports its latency so the "before first request" window is visible.
 """
 from __future__ import annotations
 
@@ -29,6 +34,9 @@ except ImportError:
     from result import EXIT_OK, EXIT_SMOKE, classify_exception, exit_code_for_summary, summarize_probe
     from smoke import run as run_smoke
 
+ROLE_MODES = ('workers', 'all', 'master', 'helpers')
+CLK_TCK = os.sysconf('SC_CLK_TCK') if hasattr(os, 'sysconf') else 100
+
 
 def read_exe(pid: int) -> str | None:
     """Return the resolved executable path of a Linux process, or None."""
@@ -48,14 +56,49 @@ def read_comm(pid: int) -> str | None:
         return None
 
 
+def read_stat(pid: int) -> tuple[int, int, str] | None:
+    """Return (ppid, starttime, state) from /proc/<pid>/stat."""
+    try:
+        text = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return None
+    suffix = text.rsplit(')', 1)[-1].split()
+    if len(suffix) < 20:
+        return None
+    # After the command name the array starts at field 3 (state): ppid=1, starttime=19.
+    try:
+        return int(suffix[1]), int(suffix[19]), suffix[0]
+    except (IndexError, ValueError):
+        return None
+
+
+def read_cmdline(pid: int) -> list[str]:
+    try:
+        raw = Path(f'/proc/{pid}/cmdline').read_bytes()
+    except OSError:
+        return []
+    return [part.decode('utf-8', errors='replace') for part in raw.split(b'\0') if part]
+
+
+def read_uptime() -> float:
+    try:
+        return float(Path('/proc/uptime').read_text(encoding='utf-8').split()[0])
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def process_age_ms(starttime: int) -> float:
+    """Milliseconds since the process started (0 when unknown)."""
+    if starttime <= 0:
+        return 0.0
+    age = read_uptime() - starttime / CLK_TCK
+    return max(0.0, age * 1000.0)
+
+
 def is_live(pid: int) -> bool:
     """True when the pid exists and is not a zombie."""
-    try:
-        stat = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8', errors='replace')
-    except OSError:
-        return False
-    fields = stat.rsplit(')', 1)[-1].split()
-    return bool(fields) and fields[0] not in ('Z', 'X')
+    stat = read_stat(pid)
+    return stat is not None and stat[2] not in ('Z', 'X')
 
 
 def matches(pid: int, target_exe: str | None = None, target_name: str | None = None) -> bool:
@@ -63,25 +106,29 @@ def matches(pid: int, target_exe: str | None = None, target_name: str | None = N
     if exe is None or not is_live(pid):
         return False
     if target_exe is not None:
-        if os.path.realpath(exe) != os.path.realpath(target_exe):
-            return False
-        return True
+        return os.path.realpath(exe) == os.path.realpath(target_exe)
     if target_name is not None:
-        if read_comm(pid) == target_name:
-            return True
-        if os.path.basename(exe) == target_name:
-            return True
-        return False
+        return read_comm(pid) == target_name or os.path.basename(exe) == target_name
     return False
 
 
-def scan(target_exe: str | None = None, target_name: str | None = None,
-         exclude: set[int] | None = None, include_self: bool = False) -> dict[int, str]:
-    """Map pid -> executable path for all currently matching processes."""
+def read_info(pid: int) -> dict | None:
+    """Collect pid, exe, ppid, starttime and cmdline for one process."""
+    stat = read_stat(pid)
+    exe = read_exe(pid)
+    if stat is None or exe is None or stat[2] in ('Z', 'X'):
+        return None
+    return {'pid': pid, 'exe': exe, 'ppid': stat[0], 'starttime': stat[1],
+            'cmdline': read_cmdline(pid)}
+
+
+def discover(target_exe: str | None = None, target_name: str | None = None,
+             exclude: set[int] | None = None, include_self: bool = False) -> dict[int, dict]:
+    """Return pid -> process info for every currently matching process."""
     exclude = set(exclude or ())
     if not include_self:
         exclude.add(os.getpid())
-    found: dict[int, str] = {}
+    found: dict[int, dict] = {}
     try:
         entries = os.listdir('/proc')
     except OSError:
@@ -92,22 +139,77 @@ def scan(target_exe: str | None = None, target_name: str | None = None,
         pid = int(entry)
         if pid in exclude:
             continue
-        if matches(pid, target_exe, target_name):
-            exe = read_exe(pid)
-            if exe is not None:
-                found[pid] = exe
+        if not matches(pid, target_exe, target_name):
+            continue
+        info = read_info(pid)
+        if info is not None:
+            found[pid] = info
     return found
+
+
+def scan(target_exe: str | None = None, target_name: str | None = None,
+         exclude: set[int] | None = None, include_self: bool = False) -> dict[int, str]:
+    """Map pid -> executable path for all currently matching processes."""
+    return {pid: info['exe'] for pid, info in
+            discover(target_exe, target_name, exclude, include_self).items()}
+
+
+def classify_roles(infos: dict[int, dict], helper_markers: tuple[str, ...] = ()) -> dict[int, str]:
+    """Infer master/worker/helper from the matching process tree.
+
+    A single matching root with matching descendants is a prefork server: the
+    root is the master and descendants are workers (helpers when their command
+    line contains one of the markers). Independent instances each count as a
+    worker, and a lone process is a worker too.
+    """
+    pids = set(infos)
+    children: dict[int, list[int]] = {}
+    for pid, info in infos.items():
+        parent = info.get('ppid')
+        if parent in pids:
+            children.setdefault(parent, []).append(pid)
+    roots = [pid for pid in infos if infos[pid].get('ppid') not in pids]
+
+    def kind(pid: int) -> str:
+        command = ' '.join(infos[pid].get('cmdline') or [])
+        return 'helper' if any(marker and marker in command for marker in helper_markers) else 'worker'
+
+    roles: dict[int, str] = {}
+    roots_with_children = [root for root in roots if children.get(root)]
+    if roots_with_children:
+        for root in roots_with_children:
+            roles[root] = 'master'
+        for pid in infos:
+            if pid not in roles:
+                roles[pid] = kind(pid)
+    else:
+        for pid in infos:
+            roles[pid] = kind(pid)
+    return roles
+
+
+def select_by_role(infos: dict[int, dict], roles: dict[int, str], mode: str) -> dict[int, dict]:
+    if mode == 'all':
+        wanted = {'master', 'worker', 'helper'}
+    elif mode == 'master':
+        wanted = {'master'}
+    elif mode == 'helpers':
+        wanted = {'helper'}
+    else:
+        wanted = {'worker'}
+    return {pid: info for pid, info in infos.items() if roles.get(pid) in wanted}
 
 
 class ProcessInstall:
     """One attached process and its script/session."""
 
     __slots__ = ('pid', 'exe', 'session', 'script', 'receipt', 'detached',
-                 'decisions', 'blocks', 'effect')
+                 'decisions', 'blocks', 'effect', 'role', 'starttime',
+                 'latency_ms', 'window_exceeded')
 
-    def __init__(self, pid: int, exe: str, session, script, receipt: dict):
-        self.pid = pid
-        self.exe = exe
+    def __init__(self, info: dict, session, script, receipt: dict, role: str):
+        self.pid = info['pid']
+        self.exe = info['exe']
         self.session = session
         self.script = script
         self.receipt = receipt
@@ -115,16 +217,20 @@ class ProcessInstall:
         self.decisions = 0
         self.blocks = 0
         self.effect = None
+        self.role = role
+        self.starttime = info.get('starttime') or 0
+        self.latency_ms = 0.0
+        self.window_exceeded = False
 
 
-def attach_and_install(device, pid: int, exe: str, agent_source: str,
-                       config: dict, actions: dict, on_message) -> ProcessInstall:
-    session = device.attach(pid)
+def attach_and_install(device, info: dict, agent_source: str, config: dict, actions: dict,
+                       on_message, role: str) -> ProcessInstall:
+    session = device.attach(info['pid'])
     script = session.create_script(agent_source)
     script.on('message', on_message)
     script.load()
     receipt = script.exports_sync.install(config, actions)
-    record = ProcessInstall(pid, exe, session, script, dict(receipt))
+    record = ProcessInstall(info, session, script, dict(receipt), role)
     session.on('detached', lambda reason, crash: record.detached.set())
     return record
 
@@ -151,8 +257,7 @@ def probe_process(device, pid: int, agent_source: str, config: dict, actions: di
     script = session.create_script(agent_source)
     try:
         script.load()
-        result = script.exports_sync.probe(config, actions)
-        return dict(result)
+        return dict(script.exports_sync.probe(config, actions))
     finally:
         try:
             script.unload()
@@ -174,9 +279,21 @@ def main() -> None:
     target.add_argument('--name', help='attach to every process with this comm/exe basename')
     target.add_argument('--spawn', type=Path, help='start this executable, then follow its children')
     parser.add_argument('--arg', action='append', default=[], help='arguments for --spawn')
+    parser.add_argument('--role', choices=ROLE_MODES, default='workers',
+                        help='which role receives the bundle (default: workers)')
+    parser.add_argument('--helper-arg', action='append', default=[],
+                        help='cmdline substring that marks a helper process')
     parser.add_argument('--interval', type=float, default=0.05, help='process scan interval (seconds)')
     parser.add_argument('--duration', type=float, help='stop after this many seconds; otherwise Ctrl+C')
     parser.add_argument('--exclude-pid', type=int, action='append', default=[])
+    parser.add_argument('--retry-delay', type=float, default=2.0,
+                        help='seconds before retrying a failed process')
+    parser.add_argument('--max-attempts', type=int, default=3,
+                        help='maximum install attempts per process')
+    parser.add_argument('--max-install-latency-ms', type=float,
+                        help='mark installs slower than this as window_exceeded')
+    parser.add_argument('--spawn-grace', type=float, default=0.3,
+                        help='seconds to wait for a spawned master to fork workers')
     parser.add_argument('--summary', type=Path, help='write the final JSON summary here')
     parser.add_argument('--check-only', action='store_true',
                         help='resolve and validate the bundle on every target without installing')
@@ -185,6 +302,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.interval <= 0:
         parser.error('--interval must be positive')
+    if args.retry_delay < 0:
+        parser.error('--retry-delay must be nonnegative')
+    if args.max_attempts < 1:
+        parser.error('--max-attempts must be positive')
     if args.duration is not None and args.duration < 0:
         parser.error('--duration must be nonnegative')
 
@@ -200,16 +321,23 @@ def main() -> None:
     exclude = set(args.exclude_pid)
     try:
         spawn_stdio = 'pipe' if (args.spawn and config.get('smoke')) else None
-        spawned_pid = device.spawn([str(args.spawn.resolve()), *args.arg], stdio=spawn_stdio) if args.spawn else None
+        spawned_pid = device.spawn([str(args.spawn.resolve()), *args.arg],
+                                   stdio=spawn_stdio) if args.spawn else None
     except Exception as error:
         print(json.dumps({'event': 'spawn-failed', 'error': str(error)}, ensure_ascii=False), flush=True)
         sys.exit(classify_exception(error))
+    spawn_started = time.monotonic()
+
     records: dict[int, ProcessInstall] = {}
-    failures: dict[int, str] = {}
+    failures: dict[int, dict] = {}
     detached_pids: set[int] = set()
+    first_seen: dict[int, float] = {}
     installed_count = 0
+    retry_count = 0
+    late_installs = 0
     smoke_failed = False
     effect_counts = {'installed_verified': 0, 'installed_unverified': 0, 'failed': 0}
+    role_counts: dict[str, int] = {}
     lock = threading.Lock()
 
     def emit(payload: dict) -> None:
@@ -227,34 +355,56 @@ def main() -> None:
             emit({'event': 'agent-message', 'pid': pid, 'message': message})
         return handler
 
-    def target_pids() -> dict[int, str]:
-        found: dict[int, str] = {}
+    def candidate_infos() -> dict[int, dict]:
+        infos: dict[int, dict] = {}
         if args.pid:
             for pid in args.pid:
-                exe = read_exe(pid)
-                if exe is not None and is_live(pid):
-                    found[pid] = exe
+                info = read_info(pid)
+                if info is not None:
+                    infos[pid] = info
         else:
-            found.update(scan(str(args.exe) if args.exe else None,
-                              args.name if args.name else None, exclude))
+            infos.update(discover(str(args.exe) if args.exe else None,
+                                  args.name if args.name else None, exclude))
         if spawned_pid is not None:
-            found.update(scan(str(args.spawn.resolve()), None, exclude))
-            exe = read_exe(spawned_pid)
-            if exe is not None and is_live(spawned_pid):
-                found.setdefault(spawned_pid, exe)
-        return found
+            infos.update(discover(str(args.spawn.resolve()), None, exclude))
+            info = read_info(spawned_pid)
+            if info is not None:
+                infos.setdefault(spawned_pid, info)
+        return infos
+
+    def target_infos() -> dict[int, dict]:
+        nonlocal spawn_has_children
+        infos = candidate_infos()
+        children: list[int] = []
+        if spawned_pid is not None and spawned_pid in infos:
+            children = [pid for pid, info in infos.items() if info.get('ppid') == spawned_pid]
+            if children:
+                spawn_has_children = True
+            waiting = (not children and not spawn_has_children and
+                       args.role in ('workers', 'helpers') and
+                       time.monotonic() - spawn_started < args.spawn_grace)
+            if waiting:
+                infos.pop(spawned_pid)  # let the master fork before choosing workers
+        roles = classify_roles(infos, tuple(args.helper_arg))
+        if spawned_pid is not None and spawned_pid in infos:
+            roles[spawned_pid] = ('master' if children or spawn_has_children or
+                                  args.role in ('all', 'master') else 'worker')
+        if args.pid:
+            return {pid: dict(info, role=roles.get(pid, 'explicit')) for pid, info in infos.items()}
+        selected = select_by_role(infos, roles, args.role)
+        return {pid: dict(info, role=roles.get(pid)) for pid, info in selected.items()}
 
     if args.check_only:
         results: list[dict] = []
-        for pid, exe in sorted(target_pids().items()):
+        for pid, info in sorted(target_infos().items()):
             try:
                 probe = probe_process(device, pid, agent_source, config, actions)
             except Exception as error:
                 probe = {'ok': False, 'guards': [], 'observers': [],
                          'errors': [{'code': 'E_INJECT_DENIED', 'message': str(error), 'hook': None}]}
-            results.append({'pid': pid, 'exe': exe, **probe})
-            emit({'event': 'probe', 'pid': pid, 'exe': exe, 'ok': bool(probe.get('ok')),
-                  'errors': probe.get('errors') or [],
+            results.append({'pid': pid, 'exe': info['exe'], 'role': info.get('role'), **probe})
+            emit({'event': 'probe', 'pid': pid, 'exe': info['exe'], 'role': info.get('role'),
+                  'ok': bool(probe.get('ok')), 'errors': probe.get('errors') or [],
                   'bindings': (probe.get('guards') or []) + (probe.get('observers') or [])})
         summary = summarize_probe(results)
         emit(summary)
@@ -268,37 +418,70 @@ def main() -> None:
         sys.exit(exit_code_for_summary(summary))
 
     started = time.monotonic()
+    spawned_resumed = False
+    spawn_has_children = False
     try:
         while True:
             if args.duration is not None and time.monotonic() - started >= args.duration:
                 break
-            for pid, exe in sorted(target_pids().items()):
-                if pid in records or pid in failures:
+            now = time.monotonic()
+            for pid, state in list(failures.items()):
+                if now >= state['next_at'] and state['attempts'] < args.max_attempts:
+                    del failures[pid]
+                    retry_count += 1
+            for pid, info in sorted(target_infos().items()):
+                if pid in records:
+                    if records[pid].starttime != info.get('starttime'):
+                        stale = records.pop(pid)
+                        try:
+                            stale.script.exports_sync.uninstall()
+                            stale.script.unload()
+                        except Exception:
+                            pass
+                        try:
+                            stale.session.detach()
+                        except Exception:
+                            pass
+                        detached_pids.add(pid)
+                        emit({'event': 'replaced', 'pid': pid, 'exe': info['exe']})
+                    else:
+                        continue
+                if pid in failures:
                     continue
+                first_seen.setdefault(pid, now)
                 try:
-                    record = attach_and_install(device, pid, exe, agent_source,
-                                                config, actions, on_message(pid))
+                    record = attach_and_install(device, info, agent_source,
+                                                config, actions, on_message(pid), info.get('role', 'worker'))
                 except Exception as error:  # target vanished or refused injection
-                    failures[pid] = str(error)
-                    emit({'event': 'install-failed', 'pid': pid, 'exe': exe, 'error': str(error)})
+                    previous = failures.get(pid, {'attempts': 0})
+                    failures[pid] = {'error': str(error), 'attempts': previous['attempts'] + 1,
+                                     'next_at': time.monotonic() + args.retry_delay}
+                    emit({'event': 'install-failed', 'pid': pid, 'exe': info['exe'],
+                          'attempts': failures[pid]['attempts'], 'error': str(error)})
                     continue
+                record.latency_ms = (time.monotonic() - first_seen[pid]) * 1000.0
+                record.window_exceeded = (args.max_install_latency_ms is not None and
+                                          record.latency_ms > args.max_install_latency_ms)
+                if record.window_exceeded:
+                    late_installs += 1
                 records[pid] = record
                 installed_count += 1
+                role_counts[record.role] = role_counts.get(record.role, 0) + 1
                 if pid == spawned_pid:
                     device.resume(pid)
+                    spawned_resumed = True
                 effect = run_smoke(record.script, config.get('smoke'), pid)
                 record.effect = effect
                 status = effect.get('status', 'installed_unverified')
                 effect_counts[status] = effect_counts.get(status, 0) + 1
-                emit({'event': 'installed', 'pid': pid, 'exe': exe,
+                emit({'event': 'installed', 'pid': pid, 'exe': info['exe'], 'role': record.role,
+                      'latency_ms': round(record.latency_ms, 3),
+                      'window_exceeded': record.window_exceeded,
                       'receipt': record.receipt, 'status': status, 'effect': effect})
                 if status == 'failed' and not args.smoke_warn_only:
                     smoke_failed = True
                     try:
                         record.script.exports_sync.uninstall()
-                    except Exception:
-                        pass
-                    try:
                         record.script.unload()
                     except Exception:
                         pass
@@ -307,14 +490,23 @@ def main() -> None:
                     except Exception:
                         pass
                     del records[pid]
-                    failures[pid] = 'E_SMOKE_FAILED'
-                    emit({'event': 'install-failed', 'pid': pid, 'exe': exe,
+                    failures[pid] = {'error': 'E_SMOKE_FAILED', 'attempts': args.max_attempts,
+                                     'next_at': float('inf')}
+                    emit({'event': 'install-failed', 'pid': pid, 'exe': info['exe'],
                           'error': 'E_SMOKE_FAILED'})
+            if spawned_pid is not None and not spawned_resumed:
+                # --role workers skips the master; resume it anyway so it can fork.
+                try:
+                    device.resume(spawned_pid)
+                    spawned_resumed = True
+                except Exception:
+                    pass
             for pid, record in list(records.items()):
                 if record.detached.is_set() or not is_live(pid):
                     detached_pids.add(pid)
                     del records[pid]
-                    emit({'event': 'detached', 'pid': pid,
+                    first_seen.pop(pid, None)
+                    emit({'event': 'detached', 'pid': pid, 'role': record.role,
                           'decisions': record.decisions, 'blocks': record.blocks,
                           'status': (record.effect or {}).get('status')})
             time.sleep(args.interval)
@@ -324,7 +516,7 @@ def main() -> None:
         active = list(records.values())
         released = uninstall_all(active)
         for record in active:
-            emit({'event': 'uninstalled', 'pid': record.pid,
+            emit({'event': 'uninstalled', 'pid': record.pid, 'role': record.role,
                   'decisions': record.decisions, 'blocks': record.blocks,
                   'status': (record.effect or {}).get('status')})
         summary = {
@@ -332,8 +524,11 @@ def main() -> None:
             'installed': installed_count,
             'uninstalled': released,
             'detached': sorted(detached_pids),
-            'failed': failures,
+            'failed': {str(pid): state['error'] for pid, state in failures.items()},
+            'roles': role_counts,
             'effects': effect_counts,
+            'late_installs': late_installs,
+            'retries': retry_count,
             'smoke_failed': smoke_failed,
         }
         emit(summary)
@@ -349,5 +544,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
-

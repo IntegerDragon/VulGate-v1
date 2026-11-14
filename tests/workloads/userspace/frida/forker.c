@@ -33,6 +33,29 @@ int main(int argc, char **argv)
         int iterations = argc > 3 ? atoi(argv[3]) : 40;
         return worker(index, iterations);
     }
+    if (argc > 1 && strcmp(argv[1], "respawn") == 0) {
+        int count = argc > 2 ? atoi(argv[2]) : 2;
+        int iterations = argc > 3 ? atoi(argv[3]) : 40;
+        for (int i = 0; i < count; i++) {
+            pid_t pid = fork();
+            if (pid < 0) {
+                perror("fork");
+                return 1;
+            }
+            if (pid == 0) {
+                char index[16];
+                char amount[16];
+                snprintf(index, sizeof(index), "%d", i);
+                snprintf(amount, sizeof(amount), "%d", iterations);
+                execl("/proc/self/exe", "forker", "--worker", index, amount, (char *)NULL);
+                perror("execl");
+                _exit(127);
+            }
+            int status = 0;
+            waitpid(pid, &status, 0);
+        }
+        return 0;
+    }
     int children = argc > 1 ? atoi(argv[1]) : 3;
     int iterations = argc > 2 ? atoi(argv[2]) : 40;
     if (children < 0 || children > 32 || iterations < 1 || iterations > 100000) {
