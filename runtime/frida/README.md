@@ -124,5 +124,11 @@ manifest 可声明一次 smoke 触发：
 
 安装后 launcher 触发目标并检查该 hook 的 BLOCK 计数：观察到即 `installed_verified`，未声明为 `installed_unverified`，声明但未观察到为 `failed`（`E_SMOKE_FAILED`）。失败默认卸载并以退出码 9 结束；`--smoke-warn-only` 保留安装并告警。也支持 `{"type": "exec", "command": "... {pid} ..."}` 与 `{"type": "none"}`。
 
+## 观测与熔断
+
+`--events PATH` 写出带 `ts` 的统一 JSONL 事件流；`--metrics-interval` 周期输出每进程 metrics（decisions/passes/blocks/observations/diagnostics/reentries）。
+
+熔断：`--circuit-max-diagnostics`（默认 100）与 `--circuit-window-ms`（默认 5000）构成滑动窗口；超阈值时对**该进程**卸载（`circuit-uninstalled`），记 `E_CIRCUIT_OPEN` 且不再重试，launcher 以退出码 **10** 结束。`--no-circuit-breaker` 可关闭。
+
 
 

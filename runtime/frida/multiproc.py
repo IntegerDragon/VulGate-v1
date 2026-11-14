@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Install one VulGate bundle into every matching userspace process.
 
 Unlike run.py (a single --pid or one --spawn), this launcher keeps scanning for
@@ -29,12 +29,14 @@ except ImportError:  # direct `python runtime/frida/multiproc.py`
 
 try:
     from .lifecycle import uninstall as uninstall_script
-    from .result import (EXIT_MOUNT, EXIT_OK, EXIT_SMOKE, classify_exception,
+    from .metrics import EventStream, MetricsCollector
+    from .result import (EXIT_CIRCUIT, EXIT_MOUNT, EXIT_OK, EXIT_SMOKE, classify_exception,
                            exit_code_for_summary, summarize_probe)
     from .smoke import run as run_smoke
 except ImportError:
     from lifecycle import uninstall as uninstall_script
-    from result import (EXIT_MOUNT, EXIT_OK, EXIT_SMOKE, classify_exception,
+    from metrics import EventStream, MetricsCollector
+    from result import (EXIT_CIRCUIT, EXIT_MOUNT, EXIT_OK, EXIT_SMOKE, classify_exception,
                         exit_code_for_summary, summarize_probe)
     from smoke import run as run_smoke
 
@@ -219,7 +221,7 @@ class ProcessInstall:
 
     __slots__ = ('pid', 'exe', 'session', 'script', 'receipt', 'detached',
                  'decisions', 'blocks', 'effect', 'role', 'starttime',
-                 'latency_ms', 'window_exceeded')
+                 'latency_ms', 'window_exceeded', 'circuit_open')
 
     def __init__(self, info: dict, session, script, receipt: dict, role: str):
         self.pid = info['pid']
@@ -235,6 +237,7 @@ class ProcessInstall:
         self.starttime = info.get('starttime') or 0
         self.latency_ms = 0.0
         self.window_exceeded = False
+        self.circuit_open = False
 
 
 def attach_and_install(device, info: dict, agent_source: str, config: dict, actions: dict,
@@ -317,6 +320,13 @@ def main() -> None:
                         help='how long to wait for callbacks before detaching during uninstall')
     parser.add_argument('--fail-fast', action='store_true',
                         help='stop and roll back all processes after the first install failure')
+    parser.add_argument('--events', type=Path, help='write the unified JSONL event stream here')
+    parser.add_argument('--metrics-interval', type=float, default=1.0,
+                        help='emit a metrics snapshot every N seconds (0 disables)')
+    parser.add_argument('--circuit-max-diagnostics', type=int, default=100,
+                        help='open the circuit after this many diagnostics in the window')
+    parser.add_argument('--circuit-window-ms', type=float, default=5000.0)
+    parser.add_argument('--no-circuit-breaker', action='store_true')
     args = parser.parse_args()
     if args.interval <= 0:
         parser.error('--interval must be positive')
@@ -358,9 +368,13 @@ def main() -> None:
     effect_counts = {'installed_verified': 0, 'installed_unverified': 0, 'failed': 0}
     role_counts: dict[str, int] = {}
     lock = threading.Lock()
+    collectors: dict[int, MetricsCollector | None] = {}
+    circuit_opened: set[int] = set()
+    event_stream = EventStream(args.events)
 
     def emit(payload: dict) -> None:
         print(json.dumps(payload, ensure_ascii=False), flush=True)
+        event_stream.write(payload)
 
     def on_message(pid: int):
         def handler(message, data):
@@ -370,6 +384,14 @@ def main() -> None:
                     records[pid].decisions += 1
                     if payload.get('action') == 'BLOCK':
                         records[pid].blocks += 1
+            collector = collectors.get(pid)
+            if collector is not None and collector.record_message(message):
+                record = records.get(pid)
+                if record is not None and not record.circuit_open:
+                    record.circuit_open = True
+                    emit({'event': 'circuit-open', 'pid': pid,
+                          'reason': collector.opened_reason})
+            if isinstance(payload, dict) and payload.get('event') == 'decision':
                 return
             emit({'event': 'agent-message', 'pid': pid, 'message': message})
         return handler
@@ -440,6 +462,7 @@ def main() -> None:
     spawned_resumed = False
     spawn_has_children = False
     abort = False
+    last_metrics = time.monotonic()
     try:
         while True:
             if args.duration is not None and time.monotonic() - started >= args.duration:
@@ -489,6 +512,9 @@ def main() -> None:
                                           record.latency_ms > args.max_install_latency_ms)
                 if record.window_exceeded:
                     late_installs += 1
+                collectors[pid] = None if args.no_circuit_breaker else MetricsCollector(
+                    max_diagnostics=args.circuit_max_diagnostics,
+                    window_ms=args.circuit_window_ms)
                 records[pid] = record
                 installed_count += 1
                 role_counts[record.role] = role_counts.get(record.role, 0) + 1
@@ -540,6 +566,34 @@ def main() -> None:
                     emit({'event': 'detached', 'pid': pid, 'role': record.role,
                           'decisions': record.decisions, 'blocks': record.blocks,
                           'status': (record.effect or {}).get('status')})
+            for pid, record in list(records.items()):
+                if not record.circuit_open:
+                    continue
+                try:
+                    uninstall_script(record.script, timeout_ms=args.uninstall_timeout_ms)
+                except Exception:
+                    pass
+                try:
+                    record.script.unload()
+                except Exception:
+                    pass
+                try:
+                    record.session.detach()
+                except Exception:
+                    pass
+                del records[pid]
+                first_seen.pop(pid, None)
+                circuit_opened.add(pid)
+                failures[pid] = {'error': 'E_CIRCUIT_OPEN', 'attempts': args.max_attempts,
+                                 'next_at': float('inf')}
+                collector = collectors.get(pid)
+                emit({'event': 'circuit-uninstalled', 'pid': pid,
+                      'reason': collector.opened_reason if collector is not None else None})
+            if args.metrics_interval and args.metrics_interval > 0 and now - last_metrics >= args.metrics_interval:
+                last_metrics = now
+                emit({'event': 'metrics',
+                      'pids': {str(pid): collector.snapshot()
+                               for pid, collector in collectors.items() if collector is not None}})
             time.sleep(args.interval)
     except KeyboardInterrupt:
         pass
@@ -562,6 +616,9 @@ def main() -> None:
             'retries': retry_count,
             'smoke_failed': smoke_failed,
             'fatal': fatal_error or None,
+            'circuits': sorted(circuit_opened),
+            'metrics': {str(pid): collector.snapshot()
+                        for pid, collector in collectors.items() if collector is not None},
         }
         emit(summary)
         if args.summary:
@@ -571,11 +628,18 @@ def main() -> None:
                 device.kill(spawned_pid)
             except Exception:
                 pass
-    sys.exit(EXIT_MOUNT if fatal_error else (EXIT_SMOKE if smoke_failed else EXIT_OK))
+    event_stream.close()
+    if fatal_error:
+        sys.exit(EXIT_MOUNT)
+    if circuit_opened:
+        sys.exit(EXIT_CIRCUIT)
+    sys.exit(EXIT_SMOKE if smoke_failed else EXIT_OK)
 
 
 if __name__ == '__main__':
     main()
+
+
 
 
 

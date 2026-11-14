@@ -1,4 +1,4 @@
-# 用户态补丁安装：完整工作清单（v2）
+﻿# 用户态补丁安装：完整工作清单（v2）
 
 日期：2026-11-14。本文在早先同文件版本的基础上，按“源码/构建与运行版本一致、补丁天然可挂载、只做可行性检查”的新前提重写。
 
@@ -169,12 +169,13 @@
 - **目标被替换**：`same_image()` 同时比较 starttime 与 exe 真实路径；不一致发 `replaced` 并重装（exec 后 session 断开也会触发重装）。单测覆盖 pid 复用/换镜像；WP5 respawn 集成测试覆盖顺序新进程。
 - 验收：上述测试与回归脚本在 WSL 实测通过。
 
-### WP8 观测与运维（P1）
+### WP8 观测与运维（P1）—— 已完成
 
-- 每进程指标：decisions/blocks/diagnostics/安装延迟/窗口；统一事件流（JSON lines）；
-- 熔断：map 满、VM 步数超限、未知写、诊断速率超阈值 → 自动卸载并告警；
-- 日志与审计：谁、何时、对哪个 build-id、装了哪些 hook；
-- 验收：指标可导出；熔断触发后目标恢复原行为；审计记录包含 pid/build-id/时间。
+- `runtime/frida/metrics.py`：`EventStream` 把统一事件写成带 `ts` 的 JSONL；`MetricsCollector` 统计 decisions/passes/blocks/observations/diagnostics/reentries，并在**滑动窗口**内诊断数超阈值时打开熔断。
+- `run.py` / `multiproc.py` 新增：`--events PATH`（统一事件流）、`--metrics-interval`（周期 metrics 事件）、`--circuit-max-diagnostics`/`--circuit-window-ms`/`--no-circuit-breaker`。
+- 熔断行为：命中阈值 → 发送 `circuit-open` → 对**该进程**卸载（`circuit-uninstalled`）→ 记 `E_CIRCUIT_OPEN`、不再重试；launcher 汇总包含 `circuits` 与 `metrics`，退出码 **10**（`EXIT_CIRCUIT`）。
+- 验收：单测覆盖计数/窗口过期/阈值/事件流时间戳；live 测试用容量 1 的观测 map 制造 `observation_map_full` 并触发熔断；CLI 端到端验证 `run.py --circuit-max-diagnostics 1` 退出 10 并写出事件流，`multiproc.py` 同样退出 10 且 summary 带 `circuits`。
+- 限制：熔断按进程独立；诊断来源为 agent telemetry（decision 的 diagnostic 与 diagnostic 事件），shim guard 暂无 decision 事件。
 
 ### WP9 平台与覆盖边界（P1）
 
@@ -218,7 +219,7 @@
 | WP5 | 完成：角色推断与 `--role`、spawn 宽限与 master 跳过、安装延迟测量、失败退避重试、starttime pid 复用检测、重启重挂；回归脚本已提交 |
 | WP6 | 部分：卸载静默与线程作用域观测已验证；多线程门控被 Frida replace 回调限制阻塞，证据与后续方向见 `FRIDA_THREAD_SAFETY.md` |
 | WP7 | 完成：进程内原子回滚、卸载 barrier/超时、崩溃隔离、fail-fast 回滚、starttime+exe 的替换检测；回归脚本已提交 |
-| WP8 | 部分：每进程 decisions/blocks 计数；缺统一指标/熔断/审计 |
+| WP8 | 完成：统一事件流、每进程 metrics、滑动窗口熔断与自动卸载、退出码 10；单测与 CLI 端到端验证 |
 | WP9 | 仅 x86-64 Linux；其他边界仅文档 |
 | WP10 | 部分：install/uninstall/status；缺 check/dry-run/签名/权限指南 |
 
@@ -229,3 +230,4 @@
 3. **WP5**（角色 + 首请求窗口）：决定真实服务形态可用。
 4. **WP6 + WP7**（并发/生命周期）：决定稳定性。
 5. **WP8 + WP10**（运维/交付）：决定可交付。
+

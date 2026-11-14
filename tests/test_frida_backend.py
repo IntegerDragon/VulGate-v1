@@ -766,6 +766,7 @@ def test_multiproc_reports_smoke_status(package, tmp_path):
     assert summaries and summaries[-1]['effects']['installed_verified'] == 1
 
 from runtime.frida import lifecycle
+from runtime.frida.metrics import MetricsCollector
 
 _skip_threads = pytest.mark.skipif(os.name == 'nt', reason='pthread fixture tests run on Linux')
 THREAD_SCOPE_RULE = assemble_text(
@@ -874,3 +875,89 @@ def test_failed_multi_guard_install_rolls_back(live):
     assert live.command('call 1 5') == {'result': 105, 'body_calls': 1}
     live.install()
     assert live.command('call 1 5')['result'] == -73
+
+
+def test_map_full_diagnostics_open_circuit(live):
+    config = copy.deepcopy(live.config)
+    config['telemetry'] = True
+    config['maps'] = {'limits': {'capacity': 1}}
+    config['observers'] = [{
+        'id': 'thread_value',
+        'module': live.config['guards'][0]['module'],
+        'symbol': 'fixture_observe',
+        'arg_types': ['uint64', 'uint'],
+        'map': 'limits',
+        'operation': 'set',
+        'key_arg': 0,
+        'value_arg': 1,
+    }]
+    config['guards'] = [{
+        'id': 'idle_guard',
+        'module': live.config['guards'][0]['module'],
+        'symbol': 'fixture_mulf',
+        'arg_types': ['float', 'float'],
+        'return_type': 'float',
+        'code': list(PASS_BYTECODE),
+        'action_id': 'idle_action',
+        'step_limit': 4096,
+    }]
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['idle_action'] = {'kind': 'return_float', 'value': 0}
+    assert live.install(config, catalog)['guards'] == 1
+    collector = MetricsCollector(max_diagnostics=1, window_ms=2000)
+    live.command('set 1 1')
+    live.command('set 2 2')
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not collector.circuit_open:
+        try:
+            message = live.messages.get(timeout=0.2)
+        except Exception:
+            continue
+        collector.record_message(message)
+    assert collector.circuit_open
+    assert 'observation_map_full' in collector.opened_reason
+    lifecycle.uninstall(live.script)
+    assert live.script.exports_sync.status() == {'installed': False}
+
+
+@_skip_signal
+def test_standalone_circuit_breaker_exits(package, tmp_path):
+    manifest = json.loads((package / 'fixture.manifest.json').read_text(encoding='utf-8'))
+    manifest['smoke'] = dict(SMOKE_SPEC)
+    circuit_manifest = package / 'smoke.circuit.manifest.json'
+    circuit_manifest.write_text(json.dumps(manifest), encoding='utf-8')
+    exe = package / ('frida_fixture.exe' if os.name == 'nt' else 'frida_fixture')
+    events = tmp_path / 'events.jsonl'
+    result = subprocess.run([
+        sys.executable, str(package / 'run.py'), '--spawn', str(exe),
+        '--manifest', str(circuit_manifest),
+        '--catalog', str(package / 'fixture.actions.json'),
+        '--duration', '2', '--circuit-max-diagnostics', '1',
+        '--circuit-window-ms', '2000', '--events', str(events),
+    ], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 10, result.stdout + result.stderr
+    assert 'circuit-open' in result.stdout
+    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    assert any(row.get('event') == 'agent-message' for row in rows)
+
+
+@_skip_signal
+def test_multiproc_circuit_uninstalls(package, tmp_path):
+    manifest = json.loads((package / 'fixture.manifest.json').read_text(encoding='utf-8'))
+    manifest['smoke'] = dict(SMOKE_SPEC)
+    circuit_manifest = package / 'smoke.multiproc.circuit.manifest.json'
+    circuit_manifest.write_text(json.dumps(manifest), encoding='utf-8')
+    exe = package / ('frida_fixture.exe' if os.name == 'nt' else 'frida_fixture')
+    result = subprocess.run([
+        sys.executable, str(package / 'multiproc.py'), '--spawn', str(exe),
+        '--manifest', str(circuit_manifest),
+        '--catalog', str(package / 'fixture.actions.json'),
+        '--duration', '2', '--interval', '0.02',
+        '--circuit-max-diagnostics', '1', '--circuit-window-ms', '2000',
+        '--events', str(tmp_path / 'events.jsonl'),
+    ], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 10, result.stdout + result.stderr
+    summaries = [json.loads(line) for line in result.stdout.splitlines()
+                 if line.startswith('{') and '"summary"' in line]
+    assert summaries and summaries[-1]['circuits']
+    assert 'circuit-uninstalled' in result.stdout

@@ -1,4 +1,4 @@
-"""Stable exit codes and error classification for Frida bundle operations."""
+﻿"""Stable exit codes and error classification for Frida bundle operations."""
 from __future__ import annotations
 
 EXIT_OK = 0
@@ -10,6 +10,7 @@ EXIT_TARGET = 6
 EXIT_PARTIAL = 7
 EXIT_ALREADY_INSTALLED = 8
 EXIT_SMOKE = 9
+EXIT_CIRCUIT = 10
 
 _PRIVILEGE_HINTS = (
     'permission denied',
@@ -78,3 +79,4 @@ def exit_code_for_summary(summary: dict) -> int:
     if failed < checked:
         return EXIT_PARTIAL
     return EXIT_MOUNT
+

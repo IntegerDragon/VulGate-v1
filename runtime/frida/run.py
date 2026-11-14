@@ -8,15 +8,18 @@ import json
 from pathlib import Path
 import sys
 import threading
+import time
 
 try:
     from .lifecycle import uninstall as uninstall_script
-    from .result import EXIT_OK, EXIT_SMOKE, classify_exception, classify_probe
+    from .metrics import EventStream, MetricsCollector
+    from .result import EXIT_CIRCUIT, EXIT_OK, EXIT_SMOKE, classify_exception, classify_probe
     from .smoke import run as run_smoke, validate as validate_smoke
 except ImportError:  # direct `python runtime/frida/run.py`
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from lifecycle import uninstall as uninstall_script
-    from result import EXIT_OK, EXIT_SMOKE, classify_exception, classify_probe
+    from metrics import EventStream, MetricsCollector
+    from result import EXIT_CIRCUIT, EXIT_OK, EXIT_SMOKE, classify_exception, classify_probe
     from smoke import run as run_smoke, validate as validate_smoke
 
 
@@ -72,6 +75,11 @@ def main() -> None:
                         help='keep the bundle installed even when the declared smoke check fails')
     parser.add_argument('--uninstall-timeout-ms', type=float, default=2000.0,
                         help='how long to wait for callbacks before detaching during uninstall')
+    parser.add_argument('--events', type=Path, help='write the unified JSONL event stream here')
+    parser.add_argument('--circuit-max-diagnostics', type=int, default=100,
+                        help='open the circuit after this many diagnostics in the window')
+    parser.add_argument('--circuit-window-ms', type=float, default=5000.0)
+    parser.add_argument('--no-circuit-breaker', action='store_true')
     args = parser.parse_args()
     if args.duration is not None and args.duration < 0:
         parser.error('--duration must be nonnegative')
@@ -81,6 +89,10 @@ def main() -> None:
         print(json.dumps({'event': 'bundle-error', 'error': str(error)}, ensure_ascii=False), flush=True)
         sys.exit(classify_exception(error))
     device = frida.get_local_device()
+    event_stream = EventStream(args.events)
+    collector = None if args.no_circuit_breaker else MetricsCollector(
+        max_diagnostics=args.circuit_max_diagnostics, window_ms=args.circuit_window_ms)
+    circuit = threading.Event()
     try:
         spawn_stdio = 'pipe' if (args.spawn and config.get('smoke')) else None
         pid = device.spawn([str(args.spawn.resolve()), *args.arg], stdio=spawn_stdio) if args.spawn else args.pid
@@ -101,7 +113,12 @@ def main() -> None:
         session = device.attach(pid)
         session.on('detached', on_detached)
         script = session.create_script(Path(__file__).with_name('agent.js').read_text(encoding='utf-8'))
-        script.on('message', lambda message, data: print(json.dumps(message, ensure_ascii=False), flush=True))
+        def handle_message(message, data):
+            print(json.dumps(message, ensure_ascii=False), flush=True)
+            event_stream.write({'event': 'agent-message', 'pid': pid, 'message': message})
+            if collector is not None and collector.record_message(message):
+                circuit.set()
+        script.on('message', handle_message)
         script.load()
         if args.check_only:
             probe = script.exports_sync.probe(config, actions)
@@ -122,7 +139,18 @@ def main() -> None:
                          ensure_ascii=False), flush=True)
         if status == 'failed' and not args.smoke_warn_only:
             sys.exit(EXIT_SMOKE)
-        detached.wait(args.duration)
+        deadline = None if args.duration is None else time.monotonic() + args.duration
+        while not detached.is_set() and not circuit.is_set():
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        if circuit.is_set():
+            print(json.dumps({'event': 'circuit-open', 'pid': pid,
+                              'reason': collector.opened_reason if collector else None}), flush=True)
+            sys.exit(EXIT_CIRCUIT)
+        if collector is not None:
+            print(json.dumps({'event': 'metrics', 'pid': pid,
+                              'metrics': collector.snapshot()}), flush=True)
     except KeyboardInterrupt:
         pass
     finally:
@@ -144,6 +172,7 @@ def main() -> None:
                     except Exception:
                         pass
         finally:
+            event_stream.close()
             if args.spawn and not exited.is_set():
                 try:
                     device.kill(pid)
@@ -153,6 +182,8 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
+
 
 
 
