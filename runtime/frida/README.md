@@ -100,3 +100,15 @@ python -m runtime.frida.multiproc --manifest M --catalog C --pid 1234 --pid 1235
 - fork 后不 exec 的子进程会继承 inline hook，Frida 不保证继承后的钩子可用；这类目标应由 launcher 启动并在 worker 出现时逐个安装，或由目标 exec 出 worker。
 - 回归脚本：`bash tests/workloads/userspace/frida/verify_multiproc.sh`（Linux，需 frida Python 模块）。
 
+## 安装前检查
+
+`--check-only` 只解析 bundle、不挂载任何 hook，返回每个进程的绑定结果与错误码：
+
+```sh
+python -m runtime.frida.run --pid PID --check-only --manifest M --catalog C
+python -m runtime.frida.multiproc --exe /usr/sbin/nginx --check-only --manifest M --catalog C
+```
+
+退出码：0 通过、2 参数错误、3 bundle 无效、4 挂点不可挂、5 权限/注入失败、6 目标不匹配、7 部分失败、8 已安装。错误码表见 `docs/ai/PATCH_INSTALL_NEXT_STEPS.md`。
+
+

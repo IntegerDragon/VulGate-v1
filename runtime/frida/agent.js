@@ -137,7 +137,194 @@ function remove(state) {
     state.handles = [];
 }
 
+function probeAction(action, spec, add) {
+    if (!action) {
+        add('E_ACTION_MISSING', 'action_id ' + spec.action_id + ' is not in the catalog', spec.id);
+        return;
+    }
+    const ret = spec.return_type;
+    if (action.kind === 'return_int') {
+        if (!['int', 'int64'].includes(ret) || !Number.isSafeInteger(action.value)) {
+            add('E_ACTION_ABI_MISMATCH', 'return_int requires int/int64 and an integer value', spec.id);
+        } else if (ret === 'int' && (action.value < -2147483648 || action.value > 2147483647)) {
+            add('E_ACTION_ABI_MISMATCH', 'return_int value does not fit int', spec.id);
+        }
+    } else if (action.kind === 'return_void') {
+        if (ret !== 'void') add('E_ACTION_ABI_MISMATCH', 'return_void requires a void function', spec.id);
+    } else if (action.kind === 'return_null') {
+        if (ret !== 'pointer') add('E_ACTION_ABI_MISMATCH', 'return_null requires a pointer return', spec.id);
+    } else if (action.kind === 'return_string') {
+        if (ret !== 'pointer' || typeof action.value !== 'string' || action.value.length > 4096)
+            add('E_ACTION_ABI_MISMATCH', 'return_string requires a pointer return and a short string', spec.id);
+    } else {
+        add('E_ACTION_ABI_MISMATCH', 'unsupported action kind', spec.id);
+    }
+    for (const write of action.writes || []) {
+        const valid = Number.isInteger(write.arg) && write.arg >= 0 &&
+            write.arg < (spec.arg_types || []).length &&
+            spec.arg_types[write.arg] === 'pointer' &&
+            Number.isSafeInteger(write.offset) && write.offset >= 0 &&
+            ['u32', 'u64', 'pointer'].includes(write.type);
+        if (!valid) add('E_ACTION_WRITE_INVALID', 'invalid action field write', spec.id);
+    }
+}
+
+// Resolve and validate a bundle without attaching any hook. Returns a per-hook
+// error list with stable codes; install() still performs its own checks.
+function probeBundle(config, catalog) {
+    const errors = [];
+    const add = (code, message, hook) => errors.push({code, message: String(message), hook: hook === undefined ? null : hook});
+    const guards = [];
+    const observers = [];
+    if (installed !== null) {
+        add('E_ALREADY_INSTALLED', 'a bundle is already installed in this process');
+        return {ok: false, errors, guards, observers};
+    }
+    if (Process.arch !== 'x64') add('E_ARCH_UNSUPPORTED', 'only x64 targets are supported');
+    if (!config || config.schema !== 1 || !catalog || catalog.schema !== 1) {
+        add('E_SCHEMA_INVALID', 'unsupported bundle schema');
+        return {ok: false, errors, guards, observers};
+    }
+    const maps = new Map();
+    for (const [name, definition] of Object.entries(config.maps || {})) {
+        if (!definition || !Number.isInteger(definition.capacity) || definition.capacity <= 0 ||
+            definition.capacity > 65536) {
+            add('E_MAP_INVALID', 'invalid capacity for map ' + name, name);
+        }
+        maps.set(name, definition || {});
+    }
+    const ids = new Set();
+    const addresses = new Map();
+    const resolve = (spec, kind) => {
+        if (typeof spec.module !== 'string' || !spec.module) {
+            add('E_MODULE_MISSING', 'module is required', spec.id);
+            return null;
+        }
+        let module;
+        try {
+            module = Process.getModuleByName(spec.module);
+        } catch (error) {
+            add('E_MODULE_MISSING', 'module ' + spec.module + ' is not loaded', spec.id);
+            return null;
+        }
+        if (spec.offset !== undefined) {
+            if (!Number.isSafeInteger(spec.offset) || spec.offset < 0 || spec.offset >= module.size) {
+                add('E_OFFSET_INVALID', 'offset is outside the module', spec.id);
+                return null;
+            }
+            const target = module.base.add(spec.offset);
+            const range = Process.findRangeByAddress(target);
+            if (range === null || !range.protection.includes('x')) {
+                add('E_OFFSET_INVALID', 'offset does not point at executable memory', spec.id);
+                return null;
+            }
+            return {module: spec.module, target};
+        }
+        if (typeof spec.symbol === 'string') {
+            try {
+                return {module: spec.module, target: module.getExportByName(spec.symbol)};
+            } catch (error) {
+                add('E_SYMBOL_MISSING', 'exported symbol ' + spec.symbol + ' is missing', spec.id);
+                return null;
+            }
+        }
+        add('E_MODULE_MISSING', 'module + symbol or offset is required', spec.id);
+        return null;
+    };
+    const noteAddress = (spec, resolved, out) => {
+        if (resolved === null) return;
+        const key = resolved.target.toString();
+        if (addresses.has(key)) {
+            add('E_DUPLICATE_HOOK', 'hook address already bound by ' + addresses.get(key), spec.id);
+            return;
+        }
+        addresses.set(key, spec.id);
+        out.push({id: spec.id, module: resolved.module, address: key, kind: spec.kind || 'guard'});
+    };
+    for (const spec of config.observers || []) {
+        if (!spec || typeof spec.id !== 'string' || !spec.id) {
+            add('E_HOOK_INVALID', 'observer without id', spec && spec.id);
+            continue;
+        }
+        if (ids.has(spec.id)) {
+            add('E_HOOK_INVALID', 'duplicate hook id', spec.id);
+            continue;
+        }
+        ids.add(spec.id);
+        try {
+            signature(spec);
+        } catch (error) {
+            add('E_ARITY_UNSUPPORTED', error.message, spec.id);
+            continue;
+        }
+        if (spec.operation !== 'set' && spec.operation !== 'delete') {
+            add('E_OBSERVER_INVALID', 'operation must be set or delete', spec.id);
+        }
+        if (!maps.has(spec.map)) add('E_MAP_MISSING', 'unknown observation map ' + String(spec.map), spec.id);
+        const resolved = resolve(spec, 'observer');
+        if (resolved !== null) {
+            spec.kind = 'observer';
+            noteAddress(spec, resolved, observers);
+        }
+    }
+    for (const spec of config.guards || []) {
+        if (!spec || typeof spec.id !== 'string' || !spec.id) {
+            add('E_HOOK_INVALID', 'guard without id', spec && spec.id);
+            continue;
+        }
+        if (ids.has(spec.id)) {
+            add('E_HOOK_INVALID', 'duplicate hook id', spec.id);
+            continue;
+        }
+        ids.add(spec.id);
+        try {
+            signature(spec);
+        } catch (error) {
+            add('E_ARITY_UNSUPPORTED', error.message, spec.id);
+            continue;
+        }
+        if (!['int', 'int64', 'pointer', 'void'].includes(spec.return_type)) {
+            add('E_RETURN_UNSUPPORTED', 'unsupported return ABI ' + String(spec.return_type), spec.id);
+        }
+        probeAction((catalog.actions || {})[spec.action_id], spec, add);
+        const code = spec.code;
+        if (!Array.isArray(code) || code.length === 0 || code.length > 32768 || code.length % 8 !== 0 ||
+            !code.every(x => Number.isInteger(x) && x >= 0 && x <= 255)) {
+            add('E_RULE_INVALID', 'invalid bytecode buffer', spec.id);
+        }
+        const limit = spec.step_limit === undefined ? 4096 : spec.step_limit;
+        if (!Number.isInteger(limit) || limit <= 0 || limit > 1000000) {
+            add('E_RULE_INVALID', 'invalid step limit', spec.id);
+        }
+        for (const ref of spec.observations || []) {
+            if (!maps.has(ref.map)) add('E_MAP_MISSING', 'unknown guard observation map ' + String(ref.map), spec.id);
+            if (ref.key_arg !== undefined && !(Number.isInteger(ref.key_arg) && ref.key_arg >= 0 &&
+                ref.key_arg < (spec.arg_types || []).length)) {
+                add('E_OBSERVER_INVALID', 'invalid guard key argument', spec.id);
+            }
+            if (ref.slot !== undefined && !(Number.isInteger(ref.slot) && ref.slot >= 0 && ref.slot < 16)) {
+                add('E_OBSERVER_INVALID', 'invalid guard observation slot', spec.id);
+            }
+        }
+        const resolved = resolve(spec, 'guard');
+        if (resolved !== null) {
+            spec.kind = 'guard';
+            noteAddress(spec, resolved, guards);
+        }
+    }
+    return {ok: errors.length === 0, errors, guards, observers};
+}
+
 rpc.exports = {
+    probe(config, catalog) {
+        try {
+            return probeBundle(config, catalog);
+        } catch (error) {
+            return {ok: false,
+                errors: [{code: 'E_PROBE_INTERNAL', message: String(error), hook: null}],
+                guards: [], observers: []};
+        }
+    },
     install(config, catalog) {
         requireThat(installed === null, 'hooks already installed');
         requireThat(Process.arch === 'x64', 'version 1 requires an x64 process');

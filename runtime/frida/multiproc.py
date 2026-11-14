@@ -22,6 +22,11 @@ except ImportError:  # direct `python runtime/frida/multiproc.py`
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from run import load_bundle
 
+try:
+    from .result import EXIT_OK, classify_exception, exit_code_for_summary, summarize_probe
+except ImportError:
+    from result import EXIT_OK, classify_exception, exit_code_for_summary, summarize_probe
+
 
 def read_exe(pid: int) -> str | None:
     """Return the resolved executable path of a Linux process, or None."""
@@ -137,6 +142,25 @@ def uninstall_all(records: list[ProcessInstall]) -> list[int]:
     return released
 
 
+def probe_process(device, pid: int, agent_source: str, config: dict, actions: dict) -> dict:
+    """Resolve and validate the bundle inside one process without installing."""
+    session = device.attach(pid)
+    script = session.create_script(agent_source)
+    try:
+        script.load()
+        result = script.exports_sync.probe(config, actions)
+        return dict(result)
+    finally:
+        try:
+            script.unload()
+        except Exception:
+            pass
+        try:
+            session.detach()
+        except Exception:
+            pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', type=Path, required=True)
@@ -151,6 +175,8 @@ def main() -> None:
     parser.add_argument('--duration', type=float, help='stop after this many seconds; otherwise Ctrl+C')
     parser.add_argument('--exclude-pid', type=int, action='append', default=[])
     parser.add_argument('--summary', type=Path, help='write the final JSON summary here')
+    parser.add_argument('--check-only', action='store_true',
+                        help='resolve and validate the bundle on every target without installing')
     args = parser.parse_args()
     if args.interval <= 0:
         parser.error('--interval must be positive')
@@ -159,11 +185,19 @@ def main() -> None:
 
     import frida
 
-    config, actions = load_bundle(args.manifest, args.catalog)
+    try:
+        config, actions = load_bundle(args.manifest, args.catalog)
+    except (ValueError, OSError) as error:
+        print(json.dumps({'event': 'bundle-error', 'error': str(error)}, ensure_ascii=False), flush=True)
+        sys.exit(classify_exception(error))
     agent_source = Path(__file__).with_name('agent.js').read_text(encoding='utf-8')
     device = frida.get_local_device()
     exclude = set(args.exclude_pid)
-    spawned_pid = device.spawn([str(args.spawn.resolve()), *args.arg]) if args.spawn else None
+    try:
+        spawned_pid = device.spawn([str(args.spawn.resolve()), *args.arg]) if args.spawn else None
+    except Exception as error:
+        print(json.dumps({'event': 'spawn-failed', 'error': str(error)}, ensure_ascii=False), flush=True)
+        sys.exit(classify_exception(error))
     records: dict[int, ProcessInstall] = {}
     failures: dict[int, str] = {}
     detached_pids: set[int] = set()
@@ -201,6 +235,29 @@ def main() -> None:
             if exe is not None and is_live(spawned_pid):
                 found.setdefault(spawned_pid, exe)
         return found
+
+    if args.check_only:
+        results: list[dict] = []
+        for pid, exe in sorted(target_pids().items()):
+            try:
+                probe = probe_process(device, pid, agent_source, config, actions)
+            except Exception as error:
+                probe = {'ok': False, 'guards': [], 'observers': [],
+                         'errors': [{'code': 'E_INJECT_DENIED', 'message': str(error), 'hook': None}]}
+            results.append({'pid': pid, 'exe': exe, **probe})
+            emit({'event': 'probe', 'pid': pid, 'exe': exe, 'ok': bool(probe.get('ok')),
+                  'errors': probe.get('errors') or [],
+                  'bindings': (probe.get('guards') or []) + (probe.get('observers') or [])})
+        summary = summarize_probe(results)
+        emit(summary)
+        if args.summary:
+            args.summary.write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
+        if spawned_pid is not None:
+            try:
+                device.kill(spawned_pid)
+            except Exception:
+                pass
+        sys.exit(exit_code_for_summary(summary))
 
     started = time.monotonic()
     try:

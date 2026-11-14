@@ -63,11 +63,14 @@
 | 错误码 | 触发条件 |
 |---|---|
 | `E_ARCH_UNSUPPORTED` | 目标架构不是 x64（本轮） |
+| `E_SCHEMA_INVALID` | bundle/动作目录 schema 不支持 |
 | `E_MODULE_MISSING` | `manifest.module` 在目标进程中找不到 |
 | `E_SYMBOL_MISSING` | 导出符号不存在、被 strip |
 | `E_OFFSET_INVALID` | 偏移越界/不可执行 |
 | `E_HOOK_NOT_ALIGNED` | 挂点地址不满足替换前提（可选检查） |
 | `E_DUPLICATE_HOOK` | 两个 hook 指向同一地址 |
+| `E_HOOK_INVALID` | hook 缺 id、id 重复、结构非法 |
+| `E_MAP_INVALID` | map 定义非法（容量越界等） |
 | `E_ARITY_UNSUPPORTED` | 参数个数 >6 或类型不在支持集合 |
 | `E_RETURN_UNSUPPORTED` | 返回类型不在 `int/int64/pointer/void`（本轮）或与动作不符 |
 | `E_ACTION_MISSING` | `action_id` 不在动作目录 |
@@ -95,8 +98,8 @@
 
 ### WP1 挂点可行性检查与错误码（P0）
 
-- 新增 agent RPC `probe(config, catalog)`：不挂载，只做解析与校验，返回 `{ok, bindings, errors[{code,message,hook}]}`；
-- 校验项：架构、schema、bridge ABI、模块/符号/偏移、地址可执行、参数/返回 ABI、动作目录与写字段、规则字节码、map/observer、重复 hook、已安装状态；
+- 新增 agent RPC `probe(config, catalog)`：不挂载，只做解析与校验，返回 `{ok, bindings, errors[{code,message,hook}]}`；不加载 bridge，`E_BRIDGE_ABI` 由安装阶段返回；
+- 校验项：架构、schema、模块/符号/偏移、地址可执行、参数/返回 ABI、动作目录与写字段、规则字节码（长度/范围/步数上限）、map/observer、hook id 与重复地址、已安装状态；
 - CLI：`run.py --check-only`、`multiproc.py --check`（只探测不安装）、`--fail-fast/--best-effort`；
 - 验收：构造 12 个失败场景（缺模块、缺符号、坏偏移、坏 ABI、坏动作、坏规则、重复 hook、缺 map、已安装、权限不足、目标退出、架构不符），每个返回唯一错误码且无任何副作用；成功场景 `--check-only` 退出码 0。
 

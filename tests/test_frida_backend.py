@@ -66,6 +66,9 @@ class LiveFixture:
     def install(self, config=None):
         return self.script.exports_sync.install(config or self.config, self.catalog)
 
+    def probe(self, config=None, catalog=None):
+        return self.script.exports_sync.probe(config or self.config, catalog or self.catalog)
+
     def command(self, command):
         self.process.stdin.write(command + '\n')
         self.process.stdin.flush()
@@ -347,3 +350,79 @@ def test_function_exit_observer_reads_the_field_written_before_return(live):
     assert observed is not None
     assert observed['value'] == '9'
     assert observed['operation'] == 'set'
+
+def _probe_codes(result):
+    return {error['code'] for error in result['errors']}
+
+
+def test_probe_accepts_valid_bundle(live):
+    result = live.probe()
+    assert result['ok'] is True
+    assert result['errors'] == []
+    assert {binding['id'] for binding in result['guards']} == {'limit_guard', 'byte_guard'}
+    assert {binding['id'] for binding in result['observers']} == {'record_limit', 'forget_limit'}
+
+
+def test_probe_reports_missing_module(live):
+    config = copy.deepcopy(live.config)
+    config['guards'][0]['module'] = 'missing_module'
+    assert 'E_MODULE_MISSING' in _probe_codes(live.probe(config))
+
+
+def test_probe_reports_missing_symbol(live):
+    config = copy.deepcopy(live.config)
+    config['guards'][0]['symbol'] = 'missing_symbol'
+    assert 'E_SYMBOL_MISSING' in _probe_codes(live.probe(config))
+
+
+def test_probe_reports_invalid_offset(live):
+    config = copy.deepcopy(live.config)
+    config['guards'][0].pop('symbol')
+    config['guards'][0]['offset'] = 10 ** 9
+    assert 'E_OFFSET_INVALID' in _probe_codes(live.probe(config))
+
+
+def test_probe_reports_unsupported_return(live):
+    config = copy.deepcopy(live.config)
+    config['guards'][0]['return_type'] = 'float'
+    assert 'E_RETURN_UNSUPPORTED' in _probe_codes(live.probe(config))
+
+
+def test_probe_reports_missing_action(live):
+    config = copy.deepcopy(live.config)
+    config['guards'][0]['action_id'] = 'missing_action'
+    assert 'E_ACTION_MISSING' in _probe_codes(live.probe(config))
+
+
+def test_probe_reports_action_abi_mismatch(live):
+    config = copy.deepcopy(live.config)
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['fixture_reject'] = {'kind': 'return_null'}
+    result = live.probe(config, catalog)
+    assert 'E_ACTION_ABI_MISMATCH' in _probe_codes(result)
+
+
+def test_probe_reports_invalid_rule(live):
+    config = copy.deepcopy(live.config)
+    config['guards'][0]['code'] = [1, 2, 3]
+    assert 'E_RULE_INVALID' in _probe_codes(live.probe(config))
+
+
+def test_probe_reports_duplicate_hook(live):
+    config = copy.deepcopy(live.config)
+    config['guards'][1] = copy.deepcopy(config['guards'][0])
+    config['guards'][1]['id'] = 'duplicate_guard'
+    assert 'E_DUPLICATE_HOOK' in _probe_codes(live.probe(config))
+
+
+def test_probe_reports_missing_map(live):
+    config = copy.deepcopy(live.config)
+    config['guards'][0]['observations'] = [{'map': 'missing_map', 'key_arg': 0, 'slot': 0}]
+    assert 'E_MAP_MISSING' in _probe_codes(live.probe(config))
+
+
+def test_probe_reports_already_installed(live):
+    live.install()
+    result = live.probe()
+    assert result['ok'] is False
+    assert 'E_ALREADY_INSTALLED' in _probe_codes(result)

@@ -6,7 +6,14 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import sys
 import threading
+
+try:
+    from .result import EXIT_OK, classify_exception, classify_probe
+except ImportError:  # direct `python runtime/frida/run.py`
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from result import EXIT_OK, classify_exception, classify_probe
 
 
 def load_bundle(manifest: Path, catalog: Path) -> tuple[dict, dict]:
@@ -39,12 +46,22 @@ def main() -> None:
     target.add_argument('--spawn', type=Path)
     parser.add_argument('--arg', action='append', default=[])
     parser.add_argument('--duration', type=float, help='detach after this many seconds; otherwise Ctrl+C')
+    parser.add_argument('--check-only', action='store_true',
+                        help='resolve and validate the bundle without installing hooks')
     args = parser.parse_args()
     if args.duration is not None and args.duration < 0:
         parser.error('--duration must be nonnegative')
-    config, actions = load_bundle(args.manifest, args.catalog)
+    try:
+        config, actions = load_bundle(args.manifest, args.catalog)
+    except (ValueError, OSError) as error:
+        print(json.dumps({'event': 'bundle-error', 'error': str(error)}, ensure_ascii=False), flush=True)
+        sys.exit(classify_exception(error))
     device = frida.get_local_device()
-    pid = device.spawn([str(args.spawn.resolve()), *args.arg]) if args.spawn else args.pid
+    try:
+        pid = device.spawn([str(args.spawn.resolve()), *args.arg]) if args.spawn else args.pid
+    except Exception as error:
+        print(json.dumps({'event': 'spawn-failed', 'error': str(error)}, ensure_ascii=False), flush=True)
+        sys.exit(classify_exception(error))
     session = None
     script = None
     detached = threading.Event()
@@ -61,7 +78,16 @@ def main() -> None:
         script = session.create_script(Path(__file__).with_name('agent.js').read_text(encoding='utf-8'))
         script.on('message', lambda message, data: print(json.dumps(message, ensure_ascii=False), flush=True))
         script.load()
-        result = script.exports_sync.install(config, actions)
+        if args.check_only:
+            probe = script.exports_sync.probe(config, actions)
+            print(json.dumps({'event': 'probe', 'pid': pid, 'result': probe}, ensure_ascii=False), flush=True)
+            sys.exit(classify_probe(probe.get('errors')))
+        try:
+            result = script.exports_sync.install(config, actions)
+        except Exception as error:
+            print(json.dumps({'event': 'install-failed', 'pid': pid, 'error': str(error)},
+                             ensure_ascii=False), flush=True)
+            sys.exit(classify_exception(error))
         print(json.dumps(dict(result, pid=pid, frida=frida.__version__)), flush=True)
         if args.spawn:
             device.resume(pid)
