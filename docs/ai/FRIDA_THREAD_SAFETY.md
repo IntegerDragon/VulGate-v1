@@ -80,5 +80,16 @@ LD_PRELOAD=$PWD/libvgpreload.so ./target
 
 缺口：prologue 重定位、patch 时暂停线程、W^X/加固环境、ARM64、与现有 manifest/生命周期集成。完整说明见 `experiments/native-frida/README.md`。
 
+## 2026-11-15 成熟 Hook 库实测（线程运行中安装/卸载）
+
+`experiments/mature-hooks/` 用 Frida 做运行时注入，把库 agent 加载进 4 线程持续调用的目标：
+
+- **funchook（inline hook）**：hook 生效正确（blocked 数百万次、卸载后恢复 105）；但线程持续运行时 50 轮安装/卸载 **3 次实验里 2 次目标进程崩溃**；应用层 `pause` 后 30 轮全部通过 → 引擎本身可用，但 install/uninstall 非线程安全，必须先停线程。
+- **plthook（GOT/PLT）**：3 次 × 50 轮全部通过，目标存活；但只覆盖 PLT 调用（自包含目标安装返回 -3）。
+- Dobby、subhook、Frida Gum devkit 因本机网络/编译限制未测通（详见 README）。
+
+结论：hot inline patch 需要**自实现 stop-the-world**（信号 handler 停车或外部 ptrace 挂起线程）；GOT 热路径可用 plthook；Frida `Thread.suspend` 在 17.26.2 不可用，停线程需在原生层实现。详见 `experiments/mature-hooks/README.md`。
+
+
 
 
