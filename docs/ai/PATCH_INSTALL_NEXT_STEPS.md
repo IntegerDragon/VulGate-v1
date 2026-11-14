@@ -1,83 +1,210 @@
-# 用户态补丁安装可用性：现状与后续工作
+# 用户态补丁安装：完整工作清单（v2）
 
-日期：2026-11-14。范围：只讨论“给定补丁（挂载位置 + 行为）+ 目标应用，在任意用户态目标上安装并生效”，不含符号执行与补丁正确性验证。
+日期：2026-11-14。本文在早先同文件版本的基础上，按“源码/构建与运行版本一致、补丁天然可挂载、只做可行性检查”的新前提重写。
 
-## 1. 目标与最小契约
+## 0. 前提与明确不做的事
 
-一次“可用”的安装必须同时满足：
+前提（本次假设）：
 
-1. **定位**：从目标二进制中唯一确定挂载点（模块 + 符号或模块 + 偏移），并验证目标身份（路径、构建号/哈希）。
-2. **安装**：在目标进程内建立门控，替换目标函数的返回或写入约定字段；每个进程独立回执。
-3. **生效**：安装后至少触发一次 `BLOCK` 的实测证据；只有安装回执而没有触发证据时，报告必须写 `installed_unverified`。
-4. **撤销**：卸载后目标函数恢复原行为，进程继续正常运行。
-5. **多进程**：master/worker（nginx、httpd prefork、PHP-FPM）中的每个工作进程都被安装，主进程不误装。
-6. **失败安全**：目标不匹配、符号缺失、ABI 不符、注入失败时拒绝安装并清理已装部分。
+1. **源码、编译选项与线上运行版本一致**：不处理版本漂移、不重建目标、不做发行版适配。
+2. **补丁在编写时就是可挂载的**：不做自动切点上移、不做内联适配、不做 LTO/ICF 自动纠正。
+3. **挂点可行性检查只回答“能不能挂”**：不能挂就返回错误码/错误信息并停止安装。
+4. 不包含符号执行、补丁正确性验证、误伤统计。
+5. 首要目标是 Linux x86-64 的 C/C++ 用户态应用；其他架构/语言只定义边界，不在本轮实现。
 
-## 2. 本次已完成并验证
+明确不做：
 
-- `runtime/frida/multiproc.py`：按 `--exe` / `--name` 扫描 `/proc`，或 `--spawn` 托管启动并跟随后代；对每个新进程独立 attach、安装、回执；结束时统一卸载并打印 `summary`。
-- `tests/workloads/userspace/frida/forker.c` + `verify_multiproc.sh`：父进程 fork+exec 出 3 个 worker，worker 循环调用目标函数。实测父进程 + 3 个 worker 共 4 个进程全部安装；worker 返回值从 42 变为动作目录的 -73，卸载后恢复。
-- `tests/test_frida_multiproc.py`：进程发现、匹配、自我排除的单元测试（Linux）。
-- 已知平台约束：Yama `ptrace_scope=1` 下只能注入本进程启动的进程树；注入已运行进程需要 root 或 `CAP_SYS_PTRACE`。fork 后不 exec 的子进程会继承 inline hook，Frida 不保证继承后的钩子可用。
+- 版本漂移检测与自动适配；
+- 内联函数自动外移、切点自动上移；
+- 任意语言/运行时（JIT）适配；
+- 补丁语义正确性证明。
 
-## 3. P0：决定“任意目标可装且生效”
+## 1. 目标定义
 
-### 3.1 目标与挂点解析
+输入：
 
-- 符号优先（`module + symbol`），无符号时用 `build-id -> offset` 离线表（构建期生成，随二进制哈希钉死）。
-- 模块解析覆盖主程序、共享库、运行期 `dlopen` 的模块；同名模块要按路径区分。
-- 拒绝内联/被合并的函数：要么自动上移挂到保留的外层函数，要么明确报错。
-- 安装前校验目标路径、`build-id` 或哈希；不匹配拒绝安装。
-- 验收：对 stripped、`-O2` 构建的真实程序能绑定至少一个挂点；错误目标/错误偏移给出可读错误且不残留 hook。
+- `bundle`：`manifest.json`（guards/observers/maps/artifact 校验）+ `actions.json`（动作目录）+ `guard-*.bin`（VM 字节码）+ `bridge` 本地库；
+- 目标：进程（pid/表达式/名称）或可执行文件（托管启动）。
 
-### 3.2 进程角色与安装时机
+输出（每个进程一份）：
 
-- 区分 master / worker / helper：`--exe` 扫描到的进程不能全部安装；需要角色规则（ppid、命令行、进程树层级、cgroup）。
-- master 不安装，只安装 worker；worker 由 master `fork`（nginx）或 `fork+exec`（httpd prefork 的某些配置）。
-- 安装时机：尽量在 worker 接受首个请求前完成。可用的工程手段：
-  1. 暂缓 worker 的请求入口（例如临时挂 accept/读取入口，安装完成后再放行）；
-  2. 由 launcher 托管启动，快速扫描（10–20 ms）；
-  3. 接受安装窗口，但在回执里记录窗口长度。
-- 验收：nginx `worker_processes 4` 下 4 个 worker 全部安装、master 未安装；首个外部请求前完成（或明确记录窗口）。
+```json
+{
+  "pid": 1234,
+  "status": "installed_verified | installed_unverified | failed",
+  "code": "E_OK | E_*",
+  "message": "human readable",
+  "bindings": [{"id": "...", "module": "...", "address": "0x..."}],
+  "effect": {"triggered": true, "decision": "BLOCK", "value": "-73"},
+  "decisions": 0,
+  "blocks": 0
+}
+```
 
-### 3.3 ABI 与行为
+成功标准：**装上（可解释）→ 生效（有触发证据）→ 可安全卸载**；失败必须给出稳定错误码与可读原因，且不残留半装状态。
 
-- 参数：已支持 x64 SysV 的整数/指针（≤6 个）；需要浮点（XMM）、结构体参数、结构体返回值（sret）；可变参数明确拒绝。
-- PASS 路径的 `errno`/TLS 错误码透传（当前只在部分路径保存）。
-- 动作目录补齐：输出参数初始化（置 NULL/0）、多字段写、资源清理（解锁、关 fd、减引用）、幂等（重复 BLOCK 不累计副作用）。
-- 验收：int/int64/pointer/void 四类返回在测试程序上安装并正确返回；errno 保留；动作重复触发不产生额外副作用。
+## 2. 错误码与结果模型（P0，所有后续工作的地基）
 
-### 3.4 生效自证
+### 2.1 CLI 退出码
 
-- manifest 增加可选 `smoke` 触发项（协议请求、stdin 行、C 调用）；安装后自动执行一次并检查 `BLOCK` 与动作返回值。
-- 无触发项时报告 `installed_unverified`，不冒充“已生效”。
-- 验收：触发项成功时回执包含 `decision=BLOCK` 与动作值；未提供触发项时状态字段明确。
+| 退出码 | 含义 |
+|---|---|
+| 0 | 全部目标安装成功（且若声明 smoke，全部触发成功） |
+| 2 | 参数/用法错误 |
+| 3 | bundle 本身无效（schema/字节码/动作目录不一致） |
+| 4 | 挂点不可挂（解析失败、ABI 不支持等） |
+| 5 | 权限/注入失败 |
+| 6 | 目标不匹配（build-id/哈希/架构不符） |
+| 7 | 部分目标失败（`--fail-fast` 下不会出现） |
+| 8 | 已安装/重复安装 |
 
-### 3.5 生命周期与失败安全
+### 2.2 挂点错误码
 
-- 安装中途失败回滚（当前 agent 的 `install` 已做 `remove`，需要补多进程层面的部分失败处理）。
-- 运行期卸载：agent 要求 `active === 0`，热卸载需要通过 `barrier` 等待静默或返回 `busy`。
-- 目标重启：`--exe/--name` 扫描自动重装（已具备），需要有上限与退避，避免崩溃循环。
-- 验收：杀死一个 worker 后新 worker 自动安装；卸载后调用恢复原结果；目标反复重启不导致 launcher 卡死。
+| 错误码 | 触发条件 |
+|---|---|
+| `E_ARCH_UNSUPPORTED` | 目标架构不是 x64（本轮） |
+| `E_MODULE_MISSING` | `manifest.module` 在目标进程中找不到 |
+| `E_SYMBOL_MISSING` | 导出符号不存在、被 strip |
+| `E_OFFSET_INVALID` | 偏移越界/不可执行 |
+| `E_HOOK_NOT_ALIGNED` | 挂点地址不满足替换前提（可选检查） |
+| `E_DUPLICATE_HOOK` | 两个 hook 指向同一地址 |
+| `E_ARITY_UNSUPPORTED` | 参数个数 >6 或类型不在支持集合 |
+| `E_RETURN_UNSUPPORTED` | 返回类型不在 `int/int64/pointer/void`（本轮）或与动作不符 |
+| `E_ACTION_MISSING` | `action_id` 不在动作目录 |
+| `E_ACTION_ABI_MISMATCH` | 动作类型与返回类型/参数类型不匹配 |
+| `E_ACTION_WRITE_INVALID` | 动作写字段的目标参数不是 pointer 或偏移/宽度非法 |
+| `E_RULE_INVALID` | 字节码为空、长度非 8 倍数、超上限、VM 校验拒绝 |
+| `E_MAP_MISSING` | guard/observer 引用了不存在的 map |
+| `E_OBSERVER_INVALID` | 观测点操作/键/值声明非法 |
+| `E_BRIDGE_ABI` | bridge 版本不匹配（`vg_abi_version`） |
+| `E_ALREADY_INSTALLED` | 同一进程已安装同 bundle |
+| `E_TARGET_BUSY` | 卸载/安装时仍有回调在跑 |
+| `E_INJECT_DENIED` | ptrace 权限、Yama、LSM 拒绝 |
+| `E_TARGET_EXITED` | 解析/安装期间目标退出 |
+| `E_TARGET_MISMATCH` | 目标哈希/build-id 与 bundle 声明不符 |
+| `E_SMOKE_FAILED` | 安装成功但触发项没有产生预期 BLOCK |
 
-## 4. P1：规模化与可运维
+### 2.3 失败语义
 
-1. 目标发现配置：systemd unit、cgroup、容器（PID namespace）里的进程发现与角色规则。
-2. 事件与指标：每进程 decisions/blocks/诊断/安装延迟，统一事件流与导出。
-3. 补丁包格式：manifest + actions + bridge + 触发项版本化、哈希、签名；目标哈希白名单。
-4. 跨平台：Linux x86-64 先行；Windows 目标需要匹配目标架构的 Frida 与模块/符号解析差异。
-5. CLI 体验：`--check-only`（只解析不安装）、`--dry-run`、明确错误码。
+- **进程内原子**：先把所有 guards/observers 解析并校验完，再统一 `Interceptor.replace`；任一项失败则整进程失败、不挂任何 hook（agent 现有 `install` 已按此实现，需扩展到 probe 与错误码）。
+- **跨进程策略**：`--fail-fast`（默认：任一进程失败即停止并卸载已装）与 `--best-effort`（继续，汇总部分失败）。
+- **失败即停**：挂点不可挂时不得“跳过该 hook 继续装其他 hook”。
+- **不变量**：任何错误路径都不留下半个 hook、不残留 map、不改变目标行为。
 
-## 5. P2：生产化
+## 3. 工作包
 
-1. 权限最小化：非 root 方案（`setcap cap_sys_ptrace+ep`、Yama 策略、SELinux/AppArmor 规则）。
-2. 熔断与回滚：安装失败/异常决策率超阈值自动卸载；灰度与 kill switch。
-3. 性能与稳定性：BLOCK 全命中时的吞吐/尾延迟压测；长时间运行的内存与句柄泄漏检查。
-4. 构建集成：自动产出 `build-id -> offset` 表、结构体 layout、动作目录候选。
+### WP1 挂点可行性检查与错误码（P0）
 
-## 6. 建议的下一步（按投入产出）
+- 新增 agent RPC `probe(config, catalog)`：不挂载，只做解析与校验，返回 `{ok, bindings, errors[{code,message,hook}]}`；
+- 校验项：架构、schema、bridge ABI、模块/符号/偏移、地址可执行、参数/返回 ABI、动作目录与写字段、规则字节码、map/observer、重复 hook、已安装状态；
+- CLI：`run.py --check-only`、`multiproc.py --check`（只探测不安装）、`--fail-fast/--best-effort`；
+- 验收：构造 12 个失败场景（缺模块、缺符号、坏偏移、坏 ABI、坏动作、坏规则、重复 hook、缺 map、已安装、权限不足、目标退出、架构不符），每个返回唯一错误码且无任何副作用；成功场景 `--check-only` 退出码 0。
 
-1. **角色感知安装**：给 multiproc 增加 `--role`（master/worker）与排除规则，先用一个 fork 型 server 验证（nginx 的 master/worker 模型）。
-2. **安装窗口**：worker 首请求前完成安装的机制（临时阻塞入口 + 安装完成后放行），并记录窗口。
-3. **生效自证**：manifest `smoke` + 安装后自动触发，回执区分 `installed_verified` / `installed_unverified`。
-4. **挂点解析回退**：符号缺失时的 build-id 偏移表，先覆盖一个 stripped 构建的目标。
+### WP2 ABI 与调用约定补全（P0）
+
+- 参数：x64 SysV 整数/指针（已有）、`float/double`（XMM0–7）、小结构体按值、`sret` 返回结构体、可变参数明确拒绝；
+- 返回值：`int/int64/pointer/void`（已有）、静态字符串（已有，需保证生命周期）；
+- PASS 路径 `errno`/TLS 错误码透传（Linux glibc/musl 均需）；
+- 验收：测试程序覆盖 int/int64/pointer/void/float/double/结构体参数/结构体返回；PASS 后调用者观察到的 errno 与未安装一致；不支持的签名返回 `E_ARITY_UNSUPPORTED`/`E_RETURN_UNSUPPORTED`。
+
+### WP3 动作目录补全（P0）
+
+- 返回类：已有 4 类；
+- 输出参数初始化：置 NULL、置 0、置空串，多参数；
+- 多字段写：已有单字段；扩展到同一动作多个写入、写入前安全检查（非空/可写/宽度）；
+- 资源清理：解锁、关 fd、释放/减引用（需逐应用定义，动作目录声明）；
+- 调用既有错误路径：跳转到函数内已有错误标签（可行则做，不可行则明确不支持）；
+- 幂等性：同一函数重复 BLOCK 不产生累计副作用；
+- 验收：每类动作有单元测试 + 安装后触发测试；动作写越界/空指针时行为是拒绝安装（`E_ACTION_WRITE_INVALID`）而不是运行时崩溃。
+
+### WP4 生效自证（P0）
+
+- `manifest.smoke`：声明触发方式（命令行 stdin 行、HTTP 请求、C 调用、文件输入）；
+- 安装后自动执行一次，检查 `BLOCK` + 动作返回值；记录到 receipt `effect`；
+- 无 smoke：`installed_unverified`；smoke 失败：`failed` + `E_SMOKE_FAILED`（可配置为仅告警）；
+- 验收：有/无/失败三种状态可区分；smoke 不修改目标持久状态（或声明并清理）。
+
+### WP5 多进程与角色（P0）
+
+- 角色识别：master / worker / helper（ppid、命令行、进程树层级、可配置规则）；
+- 默认只装 worker；master 跳过并记录；
+- 首请求前窗口：暂缓 worker 请求入口（如临时挂 accept/read 入口）→ 安装完成 → 放行；或快速扫描并记录窗口长度；
+- fork 不 exec 场景：不依赖继承 hook，逐进程安装；检测已继承的 Frida 状态并拒绝/重装；
+- 重启重挂：新 worker 自动安装，带退避与上限；pid 复用检测；
+- 验收：fork 型 master/worker 测试程序（4 worker）全部安装、master 不装；首请求前完成或窗口有记录；kill worker 后新 worker 自动安装。
+
+### WP6 线程与并发安全（P0）
+
+- 替换期间的静默：定义 `Interceptor.replace` 与并发调用的关系，必要时用 `barrier`/暂停窗口；
+- 多线程并发命中：决策计数、map 线程作用域、无数据竞争（桥内状态需线程安全或按线程隔离）；
+- 重入：hook 调用的函数又被同一 hook 命中时的递归保护；
+- 验收：多线程压测（≥8 线程、≥100k 次调用）无崩溃、无丢失决策、计数一致。
+
+### WP7 生命周期与失败安全（P1）
+
+- 部分安装失败回滚（已有 agent 内 `remove`，需覆盖 probe 后安装阶段）；
+- 卸载：`barrier` 等静默，超时返回 `E_TARGET_BUSY`；
+- 目标崩溃隔离：一个进程崩溃不影响 launcher 与其他进程；
+- 目标被替换（`/proc/pid/exe` 指向 `(deleted)`）与 pid 复用；
+- 验收：注入中途杀目标不留残留；卸载后调用恢复原行为；单进程崩溃其他进程继续。
+
+### WP8 观测与运维（P1）
+
+- 每进程指标：decisions/blocks/diagnostics/安装延迟/窗口；统一事件流（JSON lines）；
+- 熔断：map 满、VM 步数超限、未知写、诊断速率超阈值 → 自动卸载并告警；
+- 日志与审计：谁、何时、对哪个 build-id、装了哪些 hook；
+- 验收：指标可导出；熔断触发后目标恢复原行为；审计记录包含 pid/build-id/时间。
+
+### WP9 平台与覆盖边界（P1）
+
+- x86-64 Linux：本轮完成；
+- ARM64：Frida 支持，但 SysV ABI（x0–x7）、返回值替换、汇编桩需重做，列为后续；
+- 静态链接/musl/stripped：挂点靠 build-id→offset 表（源码一致前提下可由构建产出），列为后续；
+- 语言边界：C/C++ 支持；Go/Rust（符号少、内联多）仅偏移级且动作受限；Java/JS/JIT 不支持（明确写进文档）。
+
+### WP10 交付与集成（P2）
+
+- bundle 格式版本化与签名；目标身份校验（build-id/哈希）；
+- CLI 完整：`install/uninstall/status/check`、`--dry-run`、`--fail-fast`、`--summary`；
+- 权限指南：托管启动（无特权）/ root / `setcap cap_sys_ptrace+ep` / systemd `AmbientCapabilities` / 容器 `--cap-add=SYS_PTRACE`；
+- systemd/容器集成与重启策略；
+- 验收：一条命令完成“检查→安装→触发→卸载”，退出码与错误码稳定。
+
+## 4. 里程碑
+
+| 里程碑 | 内容 | 验收 |
+|---|---|---|
+| M1 可挂且可解释 | WP1 + WP3 基础 | 12 个错误场景错误码正确；成功场景 `check` 通过 |
+| M2 装得上且证明生效 | WP2 + WP4 | 四类签名 + 动作 + smoke 全部通过 |
+| M3 生产形态 | WP5 + WP6 + WP7 | fork 型 4 worker 全装；多线程压测通过；卸载/回滚通过 |
+| M4 可运维 | WP8 + WP10 | 指标/熔断/签名/权限文档齐备 |
+
+## 5. 测试矩阵
+
+- 合成程序：单进程、fork+exec、fork 不 exec（master/worker）、多线程、热挂、重启、崩溃；
+- 真实目标：nginx/httpd/PHP（需在 v1 重建 `build/benchmark20` 二进制）；
+- 错误注入：缺模块/缺符号/坏偏移/坏 ABI/坏动作/坏规则/重复 hook/缺 map/权限拒绝/目标退出/架构不符/已安装；
+- 长稳：连续安装-卸载 1000 次；24 h 运行无句柄/内存增长。
+
+## 6. 当前实现映射
+
+| 工作包 | 现状 |
+|---|---|
+| WP1 | 部分：agent 安装前会整体解析并拒绝（已有原子性），但无 `probe` RPC、无错误码体系、无 `--check-only` |
+| WP2 | 部分：整数/指针/四类返回；缺 float/struct/sret/errno |
+| WP3 | 部分：四类返回 + 单字段写；缺输出参数初始化/资源清理/组合/幂等 |
+| WP4 | 缺：无 smoke、无 `installed_verified` 区分 |
+| WP5 | 部分：multiproc 扫描/跟随/逐进程安装已实现并验证；缺角色识别与首请求窗口 |
+| WP6 | 未知：无并发压测，桥状态线程安全未验证 |
+| WP7 | 部分：agent 安装失败回滚；缺卸载静默/崩溃隔离/pid 复用 |
+| WP8 | 部分：每进程 decisions/blocks 计数；缺统一指标/熔断/审计 |
+| WP9 | 仅 x86-64 Linux；其他边界仅文档 |
+| WP10 | 部分：install/uninstall/status；缺 check/dry-run/签名/权限指南 |
+
+## 7. 建议执行顺序
+
+1. **WP1**（错误码 + probe + `--check-only`）：后续一切工作的地基，且直接对应用户要求“不能挂就返回错误码并停止”。
+2. **WP2 + WP3 + WP4**（ABI/动作/自证）：决定“装了是否真的生效”。
+3. **WP5**（角色 + 首请求窗口）：决定真实服务形态可用。
+4. **WP6 + WP7**（并发/生命周期）：决定稳定性。
+5. **WP8 + WP10**（运维/交付）：决定可交付。
