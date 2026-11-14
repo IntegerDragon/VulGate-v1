@@ -46,3 +46,23 @@
 - 因此阻塞点不是跨模块调用，而是“在 Frida 替换回调的 pthread 上执行 VM 路径”；`vm.c` 本身是纯 C 且无 TLS，仍无法解释该挂起（疑似 Gum 回调线程状态与较长用户态执行交互）。
 - 结论：方向 1 不可行；多线程门控改为走 **方向 2（LD_PRELOAD）** 或方向 3（eBPF），并在完成前维持“多线程不支持”的标注。
 
+## 2026-11-15 方向 2 落地：LD_PRELOAD 原生门控
+
+新增 `runtime/preload/build.py`：按 manifest/actions 生成原生 `.so`，用符号插入定义被补丁函数，库内**静态链接 `runtime/vm.c`** 执行规则；BLOCK 执行动作，PASS 通过 `dlsym(RTLD_NEXT, ...)` 调真正实现。运行方式：
+
+```sh
+python -m runtime.preload.build --manifest m.json --catalog a.json --output libvgpreload.so
+LD_PRELOAD=$PWD/libvgpreload.so ./target
+```
+
+实测（`tests/test_preload.py`，4 线程 × 25 次）：
+
+| 场景 | 结果 |
+|---|---|
+| 无 preload | `total=100, blocked=0, calls=101`（含输出函数一次） |
+| BLOCK preload | `total=100, blocked=100, calls=0, out=0, output_result=-1`（含多字段写动作） |
+| PASS preload | `total=100, blocked=0, calls=101`（经 `dlsym(RTLD_NEXT)` 调用原函数） |
+
+限制：只覆盖**经过动态符号表（PLT）**的调用；当前 preload 不支持观察/map（后续补）；静态链接目标需改用偏移/内核方案。Frida attach 路径仍然不支持多线程门控。
+
+

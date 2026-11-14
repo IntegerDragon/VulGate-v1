@@ -15,7 +15,18 @@
 | Go / Rust | ⚠️ 受限 | 静态链接、符号少、内联多；只能按偏移挂载，动作受 ABI 限制 |
 | Java / JS / JIT 运行时 | ❌ 不支持 | 没有稳定的静态函数入口 |
 
-多线程目标：**当前不支持门控**（Frida replace 回调在非主线程崩溃，见 `FRIDA_THREAD_SAFETY.md`）。单线程/主线程调用路径的安装、验证、卸载全部可用。
+多线程目标：**Frida attach 模式不支持门控**（Frida replace 回调在非主线程崩溃，见 `FRIDA_THREAD_SAFETY.md`）；**LD_PRELOAD 原生模式已支持多线程门控**（4 线程 × 25 次实测全部 BLOCK，PASS 经 `dlsym(RTLD_NEXT)` 调用原函数），但只覆盖经过动态符号表（PLT）的调用，且当前 preload 模式不支持观察/map。
+
+## 1.1 LD_PRELOAD 模式
+
+```sh
+python -m runtime.preload.build --manifest patch/manifest.json --catalog patch/actions.json \
+  --output build/libvgpreload.so
+LD_PRELOAD=$PWD/build/libvgpreload.so ./target
+```
+
+适用于可符号插入的动态链接目标（主程序经 PLT 调用共享库导出函数）。静态链接、内部直接调用、观察点/map 暂不支持，需要 Frida 路径或后续扩展。
+
 
 ## 2. 偏移表（stripped 目标）
 
