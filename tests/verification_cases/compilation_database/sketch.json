@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "id": "capacity_filter",
+      "translation_unit": "src/operation.c",
+      "function": "operation",
+      "predicates": [{"op": ">", "args": [{"var": "count"}, {"const": 4}]}],
+      "returns": [-1]
+    }
+  ],
+  "max_rounds": 8,
+  "solver_nodes": 1000
+}

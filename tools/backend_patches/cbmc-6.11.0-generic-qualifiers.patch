@@ -1,0 +1,25 @@
+--- a/src/ansi-c/c_typecheck_expr.cpp
++++ b/src/ansi-c/c_typecheck_expr.cpp
+@@ -471,13 +471,20 @@
+     exprt default_match=nil_exprt();
+     exprt assoc_match=nil_exprt();
+ 
+-    const typet &op_type = op.type();
++    // The controlling expression undergoes lvalue conversion. Ignore its
++    // top-level qualifiers, but retain qualifiers below pointer/array types.
++    typet op_type = op.type();
++    op_type.remove(ID_C_constant);
++    op_type.remove(ID_C_volatile);
++    op_type.remove(ID_C_restricted);
++    op_type.remove(ID_C_atomic);
+ 
+     for(const auto &irep : generic_associations)
+     {
+       if(irep.get(ID_type_arg) == ID_default)
+         default_match = static_cast<const exprt &>(irep.find(ID_value));
+-      else if(op_type == static_cast<const typet &>(irep.find(ID_type_arg)))
++      else if(gcc_types_compatible_p(
++                op_type, static_cast<const typet &>(irep.find(ID_type_arg))))
+       {
+         assoc_match = static_cast<const exprt &>(irep.find(ID_value));
+       }

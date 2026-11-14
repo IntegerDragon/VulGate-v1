@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "policies": [{
+    "id": "early_failure",
+    "translation_unit": "program.c",
+    "function": "fill_value",
+    "return": -1,
+    "guard": {"const": true}
+  }]
+}

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "sources": ["src/operation.c", "harness.c"],
+  "entry": "root",
+  "targets": ["target.capacity"],
+  "compilation_database": "compile_commands.json",
+  "command_syntax": "posix",
+  "units": [
+    {"source": "harness.c", "flags": ["-std=c11", "-m64", "-Iinclude"]}
+  ],
+  "unwind": 8,
+  "timeout": 45
+}

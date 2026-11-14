@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "policies": [{
+    "id": "capacity_filter",
+    "translation_unit": "program.c",
+    "function": "perform_operation",
+    "return": -1,
+    "guard": {"op": ">", "args": [{"var": "count"}, {"const": 4}]}
+  }]
+}

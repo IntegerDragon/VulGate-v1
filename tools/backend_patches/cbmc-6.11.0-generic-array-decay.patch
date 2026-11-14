@@ -1,0 +1,19 @@
+--- a/src/ansi-c/c_typecheck_expr.cpp
++++ b/src/ansi-c/c_typecheck_expr.cpp
+@@ -474,6 +474,16 @@
+     // The controlling expression undergoes lvalue conversion. Ignore its
+     // top-level qualifiers, but retain qualifiers below pointer/array types.
+     typet op_type = op.type();
++    if(op_type.id() == ID_array)
++    {
++      typet element = to_array_type(op_type).element_type();
++      c_qualifierst qualifiers(element);
++      qualifiers += c_qualifierst(op_type);
++      qualifiers.write(element);
++      op_type = pointer_type(element);
++    }
++    else if(op_type.id() == ID_code)
++      op_type = pointer_type(op_type);
+     op_type.remove(ID_C_constant);
+     op_type.remove(ID_C_volatile);
+     op_type.remove(ID_C_restricted);

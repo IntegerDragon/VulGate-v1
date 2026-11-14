@@ -1,0 +1,5 @@
+{
+  "id": "entry-errno",
+  "dangerous_function": "pedit_act",
+  "sources": ["sample.c"]
+}

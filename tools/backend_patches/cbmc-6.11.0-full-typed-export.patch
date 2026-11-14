@@ -1,0 +1,380 @@
+--- a/src/goto-programs/show_goto_functions_json.cpp
++++ b/src/goto-programs/show_goto_functions_json.cpp
+@@ -13,6 +13,7 @@
+ 
+ #include <util/cprover_prefix.h>
+ #include <util/json_irep.h>
++#include <util/json_stream.h>
+ 
+ #include "goto_functions.h"
+ 
+@@ -22,131 +23,127 @@
+   : list_only(_list_only)
+ {}
+ 
+-/// Walks through all of the functions in the program and returns a JSON object
+-/// representing all their functions
+-/// \param goto_functions: the goto functions that make up the program
++static json_objectt function_metadata(
++  const irep_idt &name,
++  const goto_functiont &function)
++{
++  const bool is_internal = name.starts_with(CPROVER_PREFIX) ||
++                           name.starts_with("java::array[") ||
++                           name.starts_with("java::org.cprover") ||
++                           name.starts_with("java::java");
++  auto parameter_ids =
++    make_range(
++      function.parameter_identifiers.begin(),
++      function.parameter_identifiers.end())
++      .map([](const irep_idt &id) { return json_stringt{id}; });
++  return json_objectt{
++    {"name", json_stringt(name)},
++    {"isBodyAvailable", jsont::json_boolean(function.body_available())},
++    {"isInternal", jsont::json_boolean(is_internal)},
++    {"isHidden", jsont::json_boolean(function.is_hidden())},
++    {"parameterIdentifiers", json_arrayt{parameter_ids.begin(), parameter_ids.end()}}};
++}
++
++static json_objectt instruction_json(
++  const goto_programt::instructiont &instruction,
++  const json_irept &irep_converter)
++{
++  json_objectt result{
++    {"instructionId", json_stringt(instruction.to_string())},
++    {"locationNumber", json_numbert{std::to_string(instruction.location_number)}},
++    {"sourceLocationIrep", irep_converter.convert_from_irep(instruction.source_location())}};
++  if(instruction.source_location().is_not_nil())
++    result["sourceLocation"] = json(instruction.source_location());
++  std::ostringstream text;
++  instruction.output(text);
++  result["instruction"] = json_stringt(text.str());
++  if(instruction.code().is_not_nil())
++    result["code"] = irep_converter.convert_from_irep(instruction.code());
++  if(instruction.has_condition())
++    result["guard"] = irep_converter.convert_from_irep(instruction.condition());
++  if(!instruction.targets.empty())
++  {
++    auto targets = make_range(instruction.targets.begin(), instruction.targets.end())
++                     .map([](const goto_programt::targett &target) {
++                       return json_numbert{std::to_string(target->location_number)};
++                     });
++    result["targets"] = json_arrayt{targets.begin(), targets.end()};
++  }
++  if(!instruction.labels.empty())
++  {
++    auto labels = make_range(instruction.labels.begin(), instruction.labels.end())
++                    .map([](const irep_idt &id) { return json_stringt{id}; });
++    result["labels"] = json_arrayt{labels.begin(), labels.end()};
++  }
++  return result;
++}
++
++/// Build the complete JSON object for callers that need an in-memory value.
+ json_objectt show_goto_functions_jsont::convert(
+   const goto_functionst &goto_functions)
+ {
+-  json_arrayt json_functions;
+-  const json_irept no_comments_irep_converter(false);
++  json_arrayt functions;
++  const json_irept converter(true);
++  for(const auto &entry : goto_functions.sorted())
++  {
++    auto function = function_metadata(entry->first, entry->second);
++    if(!list_only && entry->second.body_available())
++    {
++      json_arrayt instructions;
++      for(const auto &instruction : entry->second.body.instructions)
++        instructions.push_back(instruction_json(instruction, converter));
++      function["instructions"] = std::move(instructions);
++    }
++    functions.push_back(std::move(function));
++  }
++  return json_objectt{
++    {"functions", functions},
++    {"irepCommentsIncluded", jsont::json_boolean(true)},
++    {"sourceLocationIrepIncluded", jsont::json_boolean(true)}};
++}
+ 
++/// Write and close one wrapper, retaining at most one instruction JSON object.
++void show_goto_functions_jsont::operator()(
++  const goto_functionst &goto_functions,
++  json_stream_objectt &out)
++{
++  const json_irept converter(true);
+   const auto sorted = goto_functions.sorted();
+-
+-  for(const auto &function_entry : sorted)
++  if(sorted.empty())
++    out.push_back("functions", json_arrayt{});
++  else
+   {
+-    const irep_idt &function_name = function_entry->first;
+-    const goto_functionst::goto_functiont &function = function_entry->second;
+-
+-    json_objectt &json_function=
+-      json_functions.push_back(jsont()).make_object();
+-    json_function["name"] = json_stringt(function_name);
+-    json_function["isBodyAvailable"]=
+-      jsont::json_boolean(function.body_available());
+-    bool is_internal = function_name.starts_with(CPROVER_PREFIX) ||
+-                       function_name.starts_with("java::array[") ||
+-                       function_name.starts_with("java::org.cprover") ||
+-                       function_name.starts_with("java::java");
+-    json_function["isInternal"]=jsont::json_boolean(is_internal);
+-    json_function["isHidden"] = jsont::json_boolean(function.is_hidden());
+-    auto json_parameter_id_range =
+-      make_range(
+-        function.parameter_identifiers.begin(),
+-        function.parameter_identifiers.end())
+-        .map([](const irep_idt &id) { return json_stringt{id}; });
+-    json_function["parameterIdentifiers"] = json_arrayt{
+-      json_parameter_id_range.begin(), json_parameter_id_range.end()};
+-
+-    if(list_only)
+-      continue;
+-
+-    if(function.body_available())
++    auto &functions = out.push_back_stream_array("functions");
++    for(const auto &entry : sorted)
+     {
+-      json_arrayt json_instruction_array=json_arrayt();
+-
+-      for(const goto_programt::instructiont &instruction :
+-        function.body.instructions)
++      auto &function = functions.push_back_stream_object();
++      // Keep the lexicographic object-key order used by convert().
++      for(const auto &field : function_metadata(entry->first, entry->second))
+       {
+-        json_objectt instruction_entry{
+-          {"instructionId", json_stringt(instruction.to_string())},
+-          {"locationNumber",
+-           json_numbert{std::to_string(instruction.location_number)}}};
+-
+-        if(instruction.source_location().is_not_nil())
++        if(field.first == "name" && !list_only && entry->second.body_available())
+         {
+-          instruction_entry["sourceLocation"] =
+-            json(instruction.source_location());
++          auto &instructions = function.push_back_stream_array("instructions");
++          for(const auto &instruction : entry->second.body.instructions)
++            instructions.push_back(instruction_json(instruction, converter));
++          instructions.close();
+         }
+-
+-        std::ostringstream instruction_builder;
+-        instruction.output(instruction_builder);
+-
+-        instruction_entry["instruction"]=
+-          json_stringt(instruction_builder.str());
+-
+-        if(instruction.code().is_not_nil())
+-        {
+-          json_objectt code_object =
+-            no_comments_irep_converter.convert_from_irep(instruction.code());
+-
+-          instruction_entry["code"] = std::move(code_object);
+-        }
+-
+-        if(instruction.has_condition())
+-        {
+-          json_objectt guard_object =
+-            no_comments_irep_converter.convert_from_irep(
+-              instruction.condition());
+-
+-          instruction_entry["guard"] = std::move(guard_object);
+-        }
+-
+-        if(!instruction.targets.empty())
+-        {
+-          auto json_target_range =
+-            make_range(instruction.targets.begin(), instruction.targets.end())
+-              .map(
+-                [](const goto_programt::targett &target) {
+-                  return json_numbert{std::to_string(target->location_number)};
+-                });
+-          instruction_entry["targets"] =
+-            json_arrayt{json_target_range.begin(), json_target_range.end()};
+-        }
+-
+-        if(!instruction.labels.empty())
+-        {
+-          auto json_label_range =
+-            make_range(instruction.labels.begin(), instruction.labels.end())
+-              .map([](const irep_idt &id) { return json_stringt{id}; });
+-          instruction_entry["labels"] =
+-            json_arrayt{json_label_range.begin(), json_label_range.end()};
+-        }
+-
+-        json_instruction_array.push_back(std::move(instruction_entry));
++        function.push_back(field.first, field.second);
+       }
+-
+-      json_function["instructions"] = std::move(json_instruction_array);
+     }
+   }
+-
+-  return json_objectt({{"functions", json_functions}});
++  out.push_back("irepCommentsIncluded", jsont::json_boolean(true));
++  out.push_back("sourceLocationIrepIncluded", jsont::json_boolean(true));
++  out.close();
+ }
+ 
+-/// Print the json object generated by
+-/// show_goto_functions_jsont::show_goto_functions to the provided stream (e.g.
+-/// std::cout)
+-/// \param goto_functions: the goto functions that make up the program
+-/// \param out: the stream to write the object to
+-/// \param append: should a command and newline be appended to the stream before
+-///   writing the JSON object. Defaults to true
++/// Stream JSON to a standalone ostream, optionally preceded by a comma/newline.
+ void show_goto_functions_jsont::operator()(
+   const goto_functionst &goto_functions,
+   std::ostream &out,
+   bool append)
+ {
+   if(append)
+-  {
+     out << ",\n";
+-  }
+-  out << convert(goto_functions);
++  json_stream_objectt wrapper(out);
++  (*this)(goto_functions, wrapper);
+ }
+--- a/src/goto-programs/show_goto_functions_json.h
++++ b/src/goto-programs/show_goto_functions_json.h
+@@ -15,6 +15,7 @@
+ #include <util/json.h>
+ 
+ class goto_functionst;
++class json_stream_objectt;
+ 
+ class show_goto_functions_jsont
+ {
+@@ -24,6 +25,8 @@
+ 
+   json_objectt convert(const goto_functionst &goto_functions);
+   void operator()(
++    const goto_functionst &goto_functions, json_stream_objectt &out);
++  void operator()(
+     const goto_functionst &goto_functions, std::ostream &out, bool append=true);
+ 
+ private:
+--- a/src/goto-programs/show_goto_functions.cpp
++++ b/src/goto-programs/show_goto_functions.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include "show_goto_functions.h"
+ 
++#include <util/json_stream.h>
+ #include <util/ui_message.h>
+ 
+ #include "goto_model.h"
+@@ -37,7 +38,13 @@
+   case ui_message_handlert::uit::JSON_UI:
+   {
+     show_goto_functions_jsont json_show_functions(list_only);
+-    msg.status() << json_show_functions.convert(goto_functions);
++    if(ui_message_handler.get_verbosity() >= messaget::M_STATUS)
++    {
++      json_show_functions(
++        goto_functions,
++        ui_message_handler.get_json_stream().push_back_stream_object());
++      ui_message_handler.flush(messaget::M_STATUS);
++    }
+   }
+   break;
+ 
+--- a/src/goto-programs/show_symbol_table.cpp
++++ b/src/goto-programs/show_symbol_table.cpp
+@@ -145,6 +145,8 @@
+   json_stream_arrayt &out = message_handler.get_json_stream();
+ 
+   json_stream_objectt &result_wrapper = out.push_back_stream_object();
++  result_wrapper.push_back("irepCommentsIncluded", jsont::json_boolean(true));
++  result_wrapper.push_back("symbolLocationIrepIncluded", jsont::json_boolean(true));
+   json_stream_objectt &result =
+     result_wrapper.push_back_stream_object("symbolTable");
+ 
+@@ -178,6 +180,7 @@
+       {"type", irep_converter.convert_from_irep(symbol.type)},
+       {"value", irep_converter.convert_from_irep(symbol.value)},
+       {"location", json(symbol.location)},
++      {"locationIrep", irep_converter.convert_from_irep(symbol.location)},
+ 
+       {"isType", jsont::json_boolean(symbol.is_type)},
+       {"isMacro", jsont::json_boolean(symbol.is_macro)},
+--- a/src/json-symtab-language/json_goto_function.cpp
++++ b/src/json-symtab-language/json_goto_function.cpp
+@@ -103,7 +103,12 @@
+   }
+   else if(instruction_type == "SKIP")
+   {
+-    return goto_programt::make_skip(source_location);
++    auto result = goto_programt::make_skip(source_location);
++    // Complete exports may carry a code_skip node with source annotations.
++    // The generic constructor starts with nil code; retain the supplied node.
++    if(json.find("code") != json.end())
++      result.code_nonconst() = try_get_code(json, ID_skip);
++    return result;
+   }
+   else if(instruction_type == "START_THREAD")
+   {
+@@ -141,9 +146,12 @@
+   }
+   else if(instruction_type == "SET_RETURN_VALUE")
+   {
+-    return goto_programt::make_set_return_value(
+-      to_code_return(try_get_code(json, ID_return)).return_value(),
+-      source_location);
++    auto code = try_get_code(json, ID_return);
++    auto result = goto_programt::make_set_return_value(
++      to_code_return(code).return_value(), source_location);
++    // Keep the complete return code, including outer source/type annotations.
++    result.code_nonconst() = std::move(code);
++    return result;
+   }
+   else if(instruction_type == "ASSIGN")
+   {
+--- a/src/goto-instrument/goto_instrument_parse_options.cpp
++++ b/src/goto-instrument/goto_instrument_parse_options.cpp
+@@ -131,6 +131,29 @@
+     register_languages();
+ 
+     get_goto_program();
++
++    // Inspect the deserialized binary before instrumentation, property
++    // relabeling, failed-symbol insertion, or initialization rewriting.
++    if(cmdline.isset("show-goto-functions-raw") ||
++       cmdline.isset("show-symbol-table-raw"))
++    {
++      const bool functions = cmdline.isset("show-goto-functions-raw");
++      if(cmdline.args.size() != 1 || !cmdline.isset("json-ui") ||
++         (functions && cmdline.isset("show-symbol-table-raw")))
++        throw invalid_command_line_argument_exceptiont{
++          "raw inspection requires one input, JSON UI, and exactly one view",
++          "--show-goto-functions-raw/--show-symbol-table-raw"};
++      for(const auto &name : cmdline.option_names())
++        if(name != "show-goto-functions-raw" && name != "show-symbol-table-raw" &&
++           name != "json-ui" && name != "verbosity")
++          throw invalid_command_line_argument_exceptiont{
++            "raw inspection cannot be combined with other operations", name};
++      if(functions)
++        show_goto_functions(goto_model, ui_message_handler, false);
++      else
++        show_symbol_table(goto_model.symbol_table, ui_message_handler);
++      return CPROVER_EXIT_SUCCESS;
++    }
+ 
+     // configure gcc, if required -- get_goto_program will have set the config
+     if(config.ansi_c.preprocessor == configt::ansi_ct::preprocessort::GCC)
+--- a/src/goto-instrument/goto_instrument_parse_options.h
++++ b/src/goto-instrument/goto_instrument_parse_options.h
+@@ -71,6 +71,7 @@
+   "(nondet-static-matching):" \
+   "(function-enter):(function-exit):(branch):" \
+   OPT_SHOW_GOTO_FUNCTIONS \
++  "(show-goto-functions-raw)(show-symbol-table-raw)" \
+   OPT_SHOW_PROPERTIES \
+   "(drop-unused-functions)" \
+   "(show-value-sets)" \

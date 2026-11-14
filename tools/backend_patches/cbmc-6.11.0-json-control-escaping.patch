@@ -1,0 +1,20 @@
+--- a/src/util/json.cpp
++++ b/src/util/json.cpp
+@@ -48,7 +48,16 @@
+       break;
+ 
+     default:
+-      out << ch;
++      if(static_cast<unsigned char>(ch) < 0x20)
++      {
++        static const char hex[] = "0123456789abcdef";
++        const auto value = static_cast<unsigned char>(ch);
++        out << "\\u00" << hex[value >> 4] << hex[value & 0x0f];
++      }
++      else
++      {
++        out << ch;
++      }
+     }
+   }
+ }

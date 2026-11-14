@@ -1,0 +1,16 @@
+.DS_Store
+.pycache/
+.cluade
+__pycache__/
+.pytest_cache/
+*.pyc
+*.o
+*.ko
+*.mod
+*.mod.c
+*.order
+*.symvers
+*.cmd
+targets/linux_userspace/request_parser
+eval/
+build/

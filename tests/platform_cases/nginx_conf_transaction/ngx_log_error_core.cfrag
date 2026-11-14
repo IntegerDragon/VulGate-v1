@@ -1,0 +1,6 @@
+{
+    (void) level;
+    (void) log;
+    (void) err;
+    (void) fmt;
+}

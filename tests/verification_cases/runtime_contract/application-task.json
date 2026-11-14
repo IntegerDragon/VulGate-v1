@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "sources": ["program.c", "harness.c", "native.c"],
+  "entry": "root",
+  "targets": ["target.capacity", "target.mark"],
+  "unwind": 16,
+  "timeout": 600
+}

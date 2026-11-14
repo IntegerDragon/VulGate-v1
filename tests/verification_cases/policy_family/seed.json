@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "policies": [{
+    "id": "capacity_gate",
+    "translation_unit": "program.c",
+    "function": "process_count",
+    "table": {
+      "predicates": [{"op": ">", "args": [{"var": "count"}, {"const": 4}]}],
+      "returns": [-1, -2],
+      "decisions": [0, 1]
+    }
+  }]
+}
