@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Install one VulGate bundle into every matching userspace process.
 
 Unlike run.py (a single --pid or one --spawn), this launcher keeps scanning for
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 from pathlib import Path
 import sys
 import threading
@@ -28,12 +29,14 @@ except ImportError:  # direct `python runtime/frida/multiproc.py`
     from run import load_bundle
 
 try:
+    from . import control
     from .lifecycle import uninstall as uninstall_script
     from .metrics import EventStream, MetricsCollector
     from .result import (EXIT_CIRCUIT, EXIT_MOUNT, EXIT_OK, EXIT_SMOKE, classify_exception,
                            exit_code_for_summary, summarize_probe)
     from .smoke import run as run_smoke
 except ImportError:
+    import control
     from lifecycle import uninstall as uninstall_script
     from metrics import EventStream, MetricsCollector
     from result import (EXIT_CIRCUIT, EXIT_MOUNT, EXIT_OK, EXIT_SMOKE, classify_exception,
@@ -327,6 +330,8 @@ def main() -> None:
                         help='open the circuit after this many diagnostics in the window')
     parser.add_argument('--circuit-window-ms', type=float, default=5000.0)
     parser.add_argument('--no-circuit-breaker', action='store_true')
+    parser.add_argument('--control-socket', type=Path,
+                        help='serve status/uninstall/metrics over this Unix socket')
     args = parser.parse_args()
     if args.interval <= 0:
         parser.error('--interval must be positive')
@@ -371,6 +376,11 @@ def main() -> None:
     collectors: dict[int, MetricsCollector | None] = {}
     circuit_opened: set[int] = set()
     event_stream = EventStream(args.events)
+    control_requests: queue.Queue = queue.Queue()
+    control_server = (control.ControlServer(args.control_socket, control.make_handler(control_requests))
+                      if args.control_socket else None)
+    if control_server is not None:
+        control_server.start()
 
     def emit(payload: dict) -> None:
         print(json.dumps(payload, ensure_ascii=False), flush=True)
@@ -395,6 +405,44 @@ def main() -> None:
                 return
             emit({'event': 'agent-message', 'pid': pid, 'message': message})
         return handler
+
+    def handle_control(request: dict) -> dict:
+        command = request.get('command')
+        if command == 'status':
+            return {'pids': {str(pid): {'installed': True, 'role': record.role,
+                                        'decisions': record.decisions, 'blocks': record.blocks,
+                                        'status': (record.effect or {}).get('status')}
+                             for pid, record in list(records.items())}}
+        if command == 'metrics':
+            return {'metrics': {str(pid): collector.snapshot()
+                               for pid, collector in collectors.items() if collector is not None}}
+        if command == 'uninstall':
+            requested = request.get('pids')
+            pids = ([int(pid) for pid in requested] if requested
+                    else list(records))
+            released = []
+            for pid in pids:
+                record = records.pop(pid, None)
+                if record is None:
+                    continue
+                try:
+                    uninstall_script(record.script, timeout_ms=args.uninstall_timeout_ms)
+                except Exception:
+                    pass
+                try:
+                    record.script.unload()
+                except Exception:
+                    pass
+                try:
+                    record.session.detach()
+                except Exception:
+                    pass
+                failures[pid] = {'error': 'E_CONTROL_UNINSTALL',
+                                 'attempts': args.max_attempts, 'next_at': float('inf')}
+                released.append(pid)
+                emit({'event': 'control-uninstall', 'pid': pid})
+            return {'uninstalled': released}
+        return {'error': 'unknown command: ' + str(command)}
 
     def candidate_infos() -> dict[int, dict]:
         infos: dict[int, dict] = {}
@@ -526,6 +574,7 @@ def main() -> None:
                 status = effect.get('status', 'installed_unverified')
                 effect_counts[status] = effect_counts.get(status, 0) + 1
                 emit({'event': 'installed', 'pid': pid, 'exe': info['exe'], 'role': record.role,
+                      'bundle_digest': config.get('bundle_digest'),
                       'latency_ms': round(record.latency_ms, 3),
                       'window_exceeded': record.window_exceeded,
                       'receipt': record.receipt, 'status': status, 'effect': effect})
@@ -594,11 +643,15 @@ def main() -> None:
                 emit({'event': 'metrics',
                       'pids': {str(pid): collector.snapshot()
                                for pid, collector in collectors.items() if collector is not None}})
+            control.drain_requests(control_requests, handle_control)
             time.sleep(args.interval)
     except KeyboardInterrupt:
         pass
     finally:
         active = list(records.values())
+        if control_server is not None:
+            control.fail_pending(control_requests, 'launcher stopping')
+            control_server.stop()
         released = uninstall_all(active, args.uninstall_timeout_ms)
         for record in active:
             emit({'event': 'uninstalled', 'pid': record.pid, 'role': record.role,
@@ -619,6 +672,7 @@ def main() -> None:
             'circuits': sorted(circuit_opened),
             'metrics': {str(pid): collector.snapshot()
                         for pid, collector in collectors.items() if collector is not None},
+            'bundle_digest': config.get('bundle_digest'),
         }
         emit(summary)
         if args.summary:
@@ -638,6 +692,8 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
+
 
 
 

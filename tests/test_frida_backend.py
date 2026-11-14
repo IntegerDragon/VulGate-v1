@@ -765,7 +765,8 @@ def test_multiproc_reports_smoke_status(package, tmp_path):
                  if line.startswith('{') and '"summary"' in line]
     assert summaries and summaries[-1]['effects']['installed_verified'] == 1
 
-from runtime.frida import lifecycle
+from runtime.frida import cli, lifecycle, symbols
+from runtime.frida.control import ControlClient
 from runtime.frida.metrics import MetricsCollector
 
 _skip_threads = pytest.mark.skipif(os.name == 'nt', reason='pthread fixture tests run on Linux')
@@ -961,3 +962,122 @@ def test_multiproc_circuit_uninstalls(package, tmp_path):
                  if line.startswith('{') and '"summary"' in line]
     assert summaries and summaries[-1]['circuits']
     assert 'circuit-uninstalled' in result.stdout
+
+
+_skip_elf = pytest.mark.skipif(not sys.platform.startswith('linux'), reason='ELF symbols need Linux tools')
+
+
+@_skip_elf
+def test_symbol_table_and_offset_mount(live, package, tmp_path):
+    exe = package / 'frida_fixture'
+    table = symbols.build_table(exe, ['fixture_target', 'fixture_mulf'])
+    assert 'fixture_target' in table['symbols']
+    assert table['load_bias'] is not None
+    written = symbols.write_table(exe, tmp_path / 'symbols.json', ['fixture_target'])
+    assert json.loads(written.read_text())['symbols']['fixture_target'] == table['symbols']['fixture_target']
+
+    config = copy.deepcopy(live.config)
+    config['maps'] = {}
+    config['observers'] = []
+    config['guards'] = [{
+        'id': 'offset_guard',
+        'module': live.config['guards'][0]['module'],
+        'offset': table['symbols']['fixture_target'],
+        'arg_types': ['uint64', 'uint'],
+        'return_type': 'int',
+        'code': list(BLOCK_BYTECODE),
+        'action_id': 'offset_block',
+        'step_limit': 4096,
+    }]
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['offset_block'] = {'kind': 'return_int', 'value': -73}
+    assert live.install(config, catalog)['guards'] == 1
+    reply = live.command('call 1 5')
+    assert reply == {'result': -73, 'body_calls': 0}
+
+
+def _spawn_fixture(package):
+    exe = package / ('frida_fixture.exe' if os.name == 'nt' else 'frida_fixture')
+    proc = subprocess.Popen([str(exe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, bufsize=1)
+    try:
+        assert json.loads(proc.stdout.readline()) == {'ready': True}
+    except BaseException:
+        proc.kill()
+        raise
+    return proc
+
+
+def test_cli_check_reports_bundle(package):
+    proc = _spawn_fixture(package)
+    agent = package / 'agent.js'
+    try:
+        probe = cli.check(proc.pid, package / 'fixture.manifest.json',
+                          package / 'fixture.actions.json', agent)
+        assert probe['ok'] is True
+
+    finally:
+        try:
+            proc.stdin.write('exit\n')
+            proc.stdin.flush()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+@_skip_signal
+def test_multiproc_control_socket(package, tmp_path):
+    manifest = json.loads((package / 'fixture.manifest.json').read_text(encoding='utf-8'))
+    manifest['smoke'] = dict(SMOKE_SPEC)
+    control_manifest = package / 'control.manifest.json'
+    control_manifest.write_text(json.dumps(manifest), encoding='utf-8')
+    exe = package / ('frida_fixture.exe' if os.name == 'nt' else 'frida_fixture')
+    socket_path = tmp_path / 'control.sock'
+    proc = subprocess.Popen([
+        sys.executable, str(package / 'multiproc.py'), '--spawn', str(exe),
+        '--manifest', str(control_manifest),
+        '--catalog', str(package / 'fixture.actions.json'),
+        '--duration', '5', '--interval', '0.02',
+        '--control-socket', str(socket_path),
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    client = ControlClient(socket_path)
+    try:
+        status = {}
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            try:
+                status = client.request({'command': 'status'})
+            except (FileNotFoundError, ConnectionError, OSError):
+                status = {}
+            if status.get('pids'):
+                break
+            time.sleep(0.1)
+        assert status.get('pids'), status
+        metrics = client.request({'command': 'metrics'})
+        assert 'metrics' in metrics
+        cli_result = subprocess.run(
+            [sys.executable, str(package / 'cli.py'), 'metrics', '--socket', str(socket_path)],
+            capture_output=True, text=True, timeout=10)
+        assert cli_result.returncode == 0, cli_result.stderr
+        assert 'metrics' in cli_result.stdout
+        result = client.request({'command': 'uninstall'})
+        assert result['uninstalled']
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if not client.request({'command': 'status'}).get('pids'):
+                break
+            time.sleep(0.1)
+        assert not client.request({'command': 'status'}).get('pids')
+        stdout, stderr = proc.communicate(timeout=20)
+        assert proc.returncode == 0, stdout + stderr
+        assert 'control-uninstall' in stdout
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+
+
+

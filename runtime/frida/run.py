@@ -6,17 +6,20 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import queue
 import sys
 import threading
 import time
 
 try:
+    from . import control
     from .lifecycle import uninstall as uninstall_script
     from .metrics import EventStream, MetricsCollector
     from .result import EXIT_CIRCUIT, EXIT_OK, EXIT_SMOKE, classify_exception, classify_probe
     from .smoke import run as run_smoke, validate as validate_smoke
 except ImportError:  # direct `python runtime/frida/run.py`
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import control
     from lifecycle import uninstall as uninstall_script
     from metrics import EventStream, MetricsCollector
     from result import EXIT_CIRCUIT, EXIT_OK, EXIT_SMOKE, classify_exception, classify_probe
@@ -24,11 +27,23 @@ except ImportError:  # direct `python runtime/frida/run.py`
 
 
 def load_bundle(manifest: Path, catalog: Path) -> tuple[dict, dict]:
+    import os
+    try:
+        from . import bundle as bundle_mod
+    except ImportError:
+        import bundle as bundle_mod
     manifest = manifest.resolve()
+    catalog = catalog.resolve()
     config = json.loads(manifest.read_text(encoding='utf-8'))
     actions = json.loads(catalog.read_text(encoding='utf-8'))
     if config.get('schema') != 1 or actions.get('schema') != 1:
         raise ValueError('unsupported bundle schema')
+    bundle_mod.require_supported(config)
+    key = os.environ.get('VULGATE_BUNDLE_KEY')
+    if key:
+        config['bundle_digest'] = bundle_mod.verify_bundle(manifest, catalog, key.encode('utf-8'))
+    else:
+        config['bundle_digest'] = bundle_mod.digest(manifest, catalog)
     config['bridge'] = str((manifest.parent / config['bridge']).resolve(strict=True))
     for name, expected in config.get('artifact_pins', {}).items():
         target = (manifest.parent / name).resolve(strict=True)
@@ -80,6 +95,8 @@ def main() -> None:
                         help='open the circuit after this many diagnostics in the window')
     parser.add_argument('--circuit-window-ms', type=float, default=5000.0)
     parser.add_argument('--no-circuit-breaker', action='store_true')
+    parser.add_argument('--control-socket', type=Path,
+                        help='serve status/uninstall/metrics over this Unix socket')
     args = parser.parse_args()
     if args.duration is not None and args.duration < 0:
         parser.error('--duration must be nonnegative')
@@ -93,6 +110,9 @@ def main() -> None:
     collector = None if args.no_circuit_breaker else MetricsCollector(
         max_diagnostics=args.circuit_max_diagnostics, window_ms=args.circuit_window_ms)
     circuit = threading.Event()
+    control_requests: queue.Queue = queue.Queue()
+    control_server = None
+    control_uninstalled = False
     try:
         spawn_stdio = 'pipe' if (args.spawn and config.get('smoke')) else None
         pid = device.spawn([str(args.spawn.resolve()), *args.arg], stdio=spawn_stdio) if args.spawn else args.pid
@@ -130,7 +150,8 @@ def main() -> None:
             print(json.dumps({'event': 'install-failed', 'pid': pid, 'error': str(error)},
                              ensure_ascii=False), flush=True)
             sys.exit(classify_exception(error))
-        print(json.dumps(dict(result, pid=pid, frida=frida.__version__)), flush=True)
+        print(json.dumps(dict(result, pid=pid, frida=frida.__version__,
+                                  bundle_digest=config.get('bundle_digest')), ensure_ascii=False), flush=True)
         if args.spawn:
             device.resume(pid)
         effect = run_smoke(script, config.get('smoke'), pid)
@@ -139,10 +160,33 @@ def main() -> None:
                          ensure_ascii=False), flush=True)
         if status == 'failed' and not args.smoke_warn_only:
             sys.exit(EXIT_SMOKE)
+        if args.control_socket:
+            def handle_control(request: dict) -> dict:
+                nonlocal control_uninstalled
+                command = request.get('command')
+                if command == 'status':
+                    return {'pids': {str(pid): {'installed': bool(
+                        script.exports_sync.status().get('installed'))}}}
+                if command == 'metrics':
+                    return {'metrics': collector.snapshot() if collector is not None else {}}
+                if command == 'uninstall':
+                    uninstall_script(script, timeout_ms=args.uninstall_timeout_ms)
+                    try:
+                        script.unload()
+                    except Exception:
+                        pass
+                    control_uninstalled = True
+                    return {'uninstalled': [pid]}
+                return {'error': 'unknown command: ' + str(command)}
+            control_server = control.ControlServer(args.control_socket,
+                                                   control.make_handler(control_requests))
+            control_server.start()
         deadline = None if args.duration is None else time.monotonic() + args.duration
-        while not detached.is_set() and not circuit.is_set():
+        while not detached.is_set() and not circuit.is_set() and not control_uninstalled:
             if deadline is not None and time.monotonic() >= deadline:
                 break
+            if control_server is not None:
+                control.drain_requests(control_requests, handle_control)
             time.sleep(0.05)
         if circuit.is_set():
             print(json.dumps({'event': 'circuit-open', 'pid': pid,
@@ -172,6 +216,9 @@ def main() -> None:
                     except Exception:
                         pass
         finally:
+            if control_server is not None:
+                control.fail_pending(control_requests, 'launcher stopping')
+                control_server.stop()
             event_stream.close()
             if args.spawn and not exited.is_set():
                 try:
@@ -182,6 +229,9 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
+
+
 
 
 

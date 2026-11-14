@@ -41,7 +41,7 @@ def build(output: Path, cc: str | None = None, with_fixture: bool = False) -> di
                          '-o', str(fixture)])
     for command in commands:
         subprocess.run(command, check=True)
-    for filename in ('agent.js', 'run.py', 'multiproc.py', 'result.py', 'smoke.py', 'lifecycle.py', 'metrics.py', 'README.md'):
+    for filename in ('agent.js', 'run.py', 'multiproc.py', 'result.py', 'smoke.py', 'lifecycle.py', 'metrics.py', 'control.py', 'cli.py', 'bundle.py', 'README.md'):
         shutil.copy2(ROOT / 'runtime/frida' / filename, output / filename)
     shutil.copy2(ROOT / 'requirements-frida.txt', output / 'requirements-frida.txt')
     if with_fixture:
@@ -89,5 +89,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
+
 
 

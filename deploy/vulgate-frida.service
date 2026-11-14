@@ -1,0 +1,25 @@
+[Unit]
+Description=VulGate Frida patch launcher
+After=network.target
+
+[Service]
+Type=simple
+# run.py/multiproc.py must stay alive: Frida hooks live inside the session.
+ExecStart=/opt/vulgate/run.py --spawn /usr/sbin/nginx \
+    --arg -g --arg "daemon off;" \
+    --manifest /etc/vulgate/patch/manifest.json \
+    --catalog /etc/vulgate/patch/actions.json \
+    --control-socket /run/vulgate/control.sock \
+    --events /var/log/vulgate/events.jsonl \
+    --uninstall-timeout-ms 2000
+# Grant only the one capability needed for ptrace injection.
+AmbientCapabilities=CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_SYS_PTRACE
+NoNewPrivileges=true
+RuntimeDirectory=vulgate
+StateDirectory=vulgate
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

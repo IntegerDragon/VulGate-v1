@@ -1,4 +1,4 @@
-﻿# 用户态补丁安装：完整工作清单（v2）
+# 用户态补丁安装：完整工作清单（v2）
 
 日期：2026-11-14。本文在早先同文件版本的基础上，按“源码/构建与运行版本一致、补丁天然可挂载、只做可行性检查”的新前提重写。
 
@@ -177,20 +177,20 @@
 - 验收：单测覆盖计数/窗口过期/阈值/事件流时间戳；live 测试用容量 1 的观测 map 制造 `observation_map_full` 并触发熔断；CLI 端到端验证 `run.py --circuit-max-diagnostics 1` 退出 10 并写出事件流，`multiproc.py` 同样退出 10 且 summary 带 `circuits`。
 - 限制：熔断按进程独立；诊断来源为 agent telemetry（decision 的 diagnostic 与 diagnostic 事件），shim guard 暂无 decision 事件。
 
-### WP9 平台与覆盖边界（P1）
+### WP9 平台与覆盖边界（P1）—— 已完成（文档 + 偏移表工具）
 
-- x86-64 Linux：本轮完成；
-- ARM64：Frida 支持，但 SysV ABI（x0–x7）、返回值替换、汇编桩需重做，列为后续；
-- 静态链接/musl/stripped：挂点靠 build-id→offset 表（源码一致前提下可由构建产出），列为后续；
-- 语言边界：C/C++ 支持；Go/Rust（符号少、内联多）仅偏移级且动作受限；Java/JS/JIT 不支持（明确写进文档）。
+- 支持矩阵、权限模型与交付方式写入 `docs/ai/PLATFORM_AND_LIMITS.md`。
+- 新增 `runtime/frida/symbols.py`：从 ELF64 解析 PT_LOAD 基址 + `nm` 符号，生成 `{build_id, load_bias, symbols}` 偏移表；实测对 `frida_fixture` 生成表后用 `offset` 挂点安装并成功 BLOCK。
+- 语言边界：C/C++ 支持；Go/Rust 仅偏移级且动作受限；Java/JS/JIT 不支持。
+- 明确未实现：ARM64（仅 x86-64）、静态/musl 实测、多线程门控（见 WP6）。
 
-### WP10 交付与集成（P2）
+### WP10 交付与集成（P2）—— 已完成
 
-- bundle 格式版本化与签名；目标身份校验（build-id/哈希）；
-- CLI 完整：`install/uninstall/status/check`、`--dry-run`、`--fail-fast`、`--summary`；
-- 权限指南：托管启动（无特权）/ root / `setcap cap_sys_ptrace+ep` / systemd `AmbientCapabilities` / 容器 `--cap-add=SYS_PTRACE`；
-- systemd/容器集成与重启策略；
-- 验收：一条命令完成“检查→安装→触发→卸载”，退出码与错误码稳定。
+- **bundle 身份**：`runtime/frida/bundle.py` 提供稳定 digest（manifest/catalog/规则/bridge/shim）、`bundle_version` 校验与 HMAC-SHA256 签名；`load_bundle` 在 `VULGATE_BUNDLE_KEY` 设置时强制验签，`bundle_digest` 写入安装回执、事件与 summary；单测覆盖稳定/篡改/缺失签名/版本拒绝。
+- **控制通道**：`runtime/frida/control.py`（Unix socket）+ `run.py`/`multiproc.py --control-socket`；`cli.py status/metrics/uninstall --socket` 可对运行中的 launcher 查询与卸载；集成测试验证 status/metrics/CLI metrics/uninstall。
+- **CLI**：`cli.py check --pid` 一次性可行性检查；长驻安装由 `run.py`/`multiproc.py` 完成（Frida hook 属于会话，CLI 进程退出即撤销）。
+- **权限指南/systemd/容器**：`PLATFORM_AND_LIMITS.md` + `deploy/README.md` + `deploy/vulgate-frida.service`（仅 `CAP_SYS_PTRACE`、`NoNewPrivileges`、控制 socket 与事件日志）。
+- 限制：签名为共享密钥 HMAC（非对称签名未做）；未在真实 nginx/httpd/PHP 二进制上执行 WP9/WP10 流程（v1 无 benchmark 构建）。
 
 ## 4. 里程碑
 
@@ -220,8 +220,8 @@
 | WP6 | 部分：卸载静默与线程作用域观测已验证；多线程门控被 Frida replace 回调限制阻塞，证据与后续方向见 `FRIDA_THREAD_SAFETY.md` |
 | WP7 | 完成：进程内原子回滚、卸载 barrier/超时、崩溃隔离、fail-fast 回滚、starttime+exe 的替换检测；回归脚本已提交 |
 | WP8 | 完成：统一事件流、每进程 metrics、滑动窗口熔断与自动卸载、退出码 10；单测与 CLI 端到端验证 |
-| WP9 | 仅 x86-64 Linux；其他边界仅文档 |
-| WP10 | 部分：install/uninstall/status；缺 check/dry-run/签名/权限指南 |
+| WP9 | 完成（文档 + 偏移表工具）：x86-64 实测；stripped 偏移表实测；ARM64/静态链接/多线程明确列为未支持 |
+| WP10 | 完成：bundle digest/版本/签名、控制 socket + CLI、权限/systemd/容器文档；签名为 HMAC 共享密钥 |
 
 ## 7. 建议执行顺序
 

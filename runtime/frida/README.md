@@ -130,5 +130,20 @@ manifest 可声明一次 smoke 触发：
 
 熔断：`--circuit-max-diagnostics`（默认 100）与 `--circuit-window-ms`（默认 5000）构成滑动窗口；超阈值时对**该进程**卸载（`circuit-uninstalled`），记 `E_CIRCUIT_OPEN` 且不再重试，launcher 以退出码 **10** 结束。`--no-circuit-breaker` 可关闭。
 
+## Bundle 身份与控制通道
+
+- `bundle_version` 由 `bundle.require_supported()` 校验；`bundle.digest()` 覆盖 manifest/catalog/规则/bridge/shim。
+- 签名：`bundle.sign_bundle(manifest, catalog, key)` 生成 `<manifest>.sig`；启动时设置 `VULGATE_BUNDLE_KEY` 即强制验签，失败则不安装。`bundle_digest` 会写进安装回执、事件与 summary。
+- Frida hook 属于会话：持久安装必须由 `run.py`/`multiproc.py` 常驻完成；一次性 `cli.py check --pid ...` 只做可行性探测。
+- 运行中的 launcher 可加 `--control-socket /run/vulgate.sock`，随后：
+
+```sh
+python runtime/frida/cli.py status    --socket /run/vulgate.sock
+python runtime/frida/cli.py metrics   --socket /run/vulgate.sock
+python runtime/frida/cli.py uninstall --socket /run/vulgate.sock [--pid N]
+```
+
+平台/权限/语言边界见 `docs/ai/PLATFORM_AND_LIMITS.md`，systemd 与容器部署示例见 `deploy/`。
+
 
 
