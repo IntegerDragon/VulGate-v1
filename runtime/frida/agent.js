@@ -3,7 +3,7 @@
 // Explicit observations and catalog-bound returns; decisions remain in the VM.
 // The policy is interpreted by runtime/vm.c, never by JavaScript predicates.
 let installed = null;
-const types = new Set(['int', 'uint', 'int64', 'uint64', 'pointer']);
+const types = new Set(['int', 'uint', 'int64', 'uint64', 'pointer', 'float', 'double']);
 
 function requireThat(condition, message) {
     if (!condition) throw new Error(message);
@@ -75,6 +75,16 @@ function signature(spec) {
 function bits(value, type, raw = false) {
     if (raw && type === 'int') return uint64(value.toInt32().toString());
     if (raw && type === 'uint') return uint64(value.toUInt32().toString());
+    if (type === 'float') {
+        const single = new Float32Array(1);
+        single[0] = Number(value);
+        return uint64(new Uint32Array(single.buffer)[0].toString());
+    }
+    if (type === 'double') {
+        const wide = new Float64Array(1);
+        wide[0] = Number(value);
+        return uint64(new BigUint64Array(wide.buffer)[0].toString());
+    }
     return uint64(value.toString());
 }
 
@@ -96,7 +106,17 @@ function catalogAction(action, spec) {
         requireThat(spec.return_type === 'pointer' && typeof action.value === 'string' &&
             action.value.length <= 4096, 'invalid catalog string return');
         value = Memory.allocUtf8String(action.value); // Allocated once at installation.
+    } else if (action.kind === 'return_float') {
+        requireThat(spec.return_type === 'float' && typeof action.value === 'number' &&
+            Number.isFinite(action.value), 'catalog float return ABI mismatch');
+        value = Math.fround(action.value);
+    } else if (action.kind === 'return_double') {
+        requireThat(spec.return_type === 'double' && typeof action.value === 'number' &&
+            Number.isFinite(action.value), 'catalog double return ABI mismatch');
+        value = Number(action.value);
     } else throw new Error('unsupported catalog action');
+    requireThat(action.errno === undefined || Number.isSafeInteger(action.errno),
+        'catalog errno must be an integer');
     const writes = (action.writes || []).map(write => {
         index(write.arg, spec.arg_types.length, 'invalid action pointer argument');
         requireThat(spec.arg_types[write.arg] === 'pointer' && Number.isSafeInteger(write.offset) &&
@@ -113,7 +133,7 @@ function catalogAction(action, spec) {
         requireThat(write.symbol ? write.type === 'pointer' : Number.isSafeInteger(fixed), 'invalid fixed field value');
         return {arg: write.arg, offset: write.offset, type: write.type, value: fixed};
     });
-    return function (args) {
+    const apply = function (args) {
         for (const write of writes) {
             const destination = args[write.arg].add(write.offset);
             if (write.type === 'pointer') destination.writePointer(ptr(write.value));
@@ -122,6 +142,8 @@ function catalogAction(action, spec) {
         }
         return value;
     };
+    if (action.errno !== undefined) apply.errno = action.errno;
+    return apply;
 }
 
 function remove(state) {
@@ -156,9 +178,17 @@ function probeAction(action, spec, add) {
     } else if (action.kind === 'return_string') {
         if (ret !== 'pointer' || typeof action.value !== 'string' || action.value.length > 4096)
             add('E_ACTION_ABI_MISMATCH', 'return_string requires a pointer return and a short string', spec.id);
+    } else if (action.kind === 'return_float') {
+        if (ret !== 'float' || typeof action.value !== 'number' || !Number.isFinite(action.value))
+            add('E_ACTION_ABI_MISMATCH', 'return_float requires a float return and a number', spec.id);
+    } else if (action.kind === 'return_double') {
+        if (ret !== 'double' || typeof action.value !== 'number' || !Number.isFinite(action.value))
+            add('E_ACTION_ABI_MISMATCH', 'return_double requires a double return and a number', spec.id);
     } else {
         add('E_ACTION_ABI_MISMATCH', 'unsupported action kind', spec.id);
     }
+    if (action.errno !== undefined && !Number.isSafeInteger(action.errno))
+        add('E_ACTION_ABI_MISMATCH', 'action errno must be an integer', spec.id);
     for (const write of action.writes || []) {
         const valid = Number.isInteger(write.arg) && write.arg >= 0 &&
             write.arg < (spec.arg_types || []).length &&
@@ -283,7 +313,7 @@ function probeBundle(config, catalog) {
             add('E_ARITY_UNSUPPORTED', error.message, spec.id);
             continue;
         }
-        if (!['int', 'int64', 'pointer', 'void'].includes(spec.return_type)) {
+        if (!['int', 'int64', 'pointer', 'void', 'float', 'double'].includes(spec.return_type)) {
             add('E_RETURN_UNSUPPORTED', 'unsupported return ABI ' + String(spec.return_type), spec.id);
         }
         probeAction((catalog.actions || {})[spec.action_id], spec, add);
@@ -394,7 +424,8 @@ rpc.exports = {
             });
             const guards = config.guards.map(spec => {
                 const target = common(spec);
-                requireThat(['int', 'int64', 'pointer', 'void'].includes(spec.return_type), 'unsupported return ABI');
+                requireThat(['int', 'int64', 'pointer', 'void', 'float', 'double'].includes(spec.return_type),
+                    'unsupported return ABI');
                 const action = catalogAction(catalog.actions[spec.action_id], spec);
                 requireThat(!('block_return' in spec) && !('action' in spec), 'guard must reference catalog action_id');
                 const slots = new Set();
@@ -699,7 +730,10 @@ rpc.exports = {
                             instructions: stats.readU64().toString(),
                             safe_reads: stats.add(8).readU64().toString(),
                             helper_calls: stats.add(16).readU64().toString()});
-                        if (!pass) return action(args);
+                        if (!pass) {
+                            if (action.errno !== undefined) this.errno = action.errno;
+                            return action(args);
+                        }
                         const result = original(...args);
                         if (Process.platform === 'windows') this.lastError = result.lastError;
                         else this.errno = result.errno;

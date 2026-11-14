@@ -103,12 +103,15 @@
 - CLI：`run.py --check-only`、`multiproc.py --check`（只探测不安装）、`--fail-fast/--best-effort`；
 - 验收：构造 12 个失败场景（缺模块、缺符号、坏偏移、坏 ABI、坏动作、坏规则、重复 hook、缺 map、已安装、权限不足、目标退出、架构不符），每个返回唯一错误码且无任何副作用；成功场景 `--check-only` 退出码 0。
 
-### WP2 ABI 与调用约定补全（P0）
+### WP2 ABI 与调用约定补全（P0）—— 部分完成
 
-- 参数：x64 SysV 整数/指针（已有）、`float/double`（XMM0–7）、小结构体按值、`sret` 返回结构体、可变参数明确拒绝；
-- 返回值：`int/int64/pointer/void`（已有）、静态字符串（已有，需保证生命周期）；
-- PASS 路径 `errno`/TLS 错误码透传（Linux glibc/musl 均需）；
-- 验收：测试程序覆盖 int/int64/pointer/void/float/double/结构体参数/结构体返回；PASS 后调用者观察到的 errno 与未安装一致；不支持的签名返回 `E_ARITY_UNSUPPORTED`/`E_RETURN_UNSUPPORTED`。
+- 已支持：`int/uint/int64/uint64/pointer/float/double` 参数与返回；动作 `return_float` / `return_double`；BLOCK 动作可声明 `errno` 并由替换回调写回调用者；PASS 路径 `errno` 透传（Linux 已验证，Windows 仍只有 `lastError` 赋值路径）。
+- 待补：**结构体按值参数**与**结构体返回（sret）**。Frida 的 `SystemFunction`/`NativeCallback` 只支持标量类型，无法直接编组结构体，因此需要按签名生成原生 shim：
+  1. 构建期按 manifest 中的签名生成 C 包装函数（`__vg_shim_<name>`），包含真实结构体类型（来自目标头文件/源码）；
+  2. 运行期 `Interceptor.replace(target, shimAddress)`，shim 读取参数 → 调桥决策 → BLOCK 返回动作值 / PASS 调用原函数；
+  3. manifest 扩展 `arg_types: [{struct: "name", size: N}]` 与 `return_type: {struct: "name"}`，probe 遇到结构体但无 shim 时返回 `E_ABI_STRUCT_UNSUPPORTED`。
+- 变参函数：manifest 显式声明 `varargs: true` 时拒绝（`E_ARITY_UNSUPPORTED`），不做 ABI 猜测。
+- 验收：已覆盖 float/double 与 errno；结构体/sret 待 shim 实现后补测试。
 
 ### WP3 动作目录补全（P0）
 
@@ -194,7 +197,7 @@
 | 工作包 | 现状 |
 |---|---|
 | WP1 | 部分：agent 安装前会整体解析并拒绝（已有原子性），但无 `probe` RPC、无错误码体系、无 `--check-only` |
-| WP2 | 部分：整数/指针/四类返回；缺 float/struct/sret/errno |
+| WP2 | 部分：整数/指针/四类返回 + `float/double` 与 errno 已实现并测试；缺结构体参数/sret（需原生 shim 方案）与变参拒绝 |
 | WP3 | 部分：四类返回 + 单字段写；缺输出参数初始化/资源清理/组合/幂等 |
 | WP4 | 缺：无 smoke、无 `installed_verified` 区分 |
 | WP5 | 部分：multiproc 扫描/跟随/逐进程安装已实现并验证；缺角色识别与首请求窗口 |

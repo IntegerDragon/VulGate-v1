@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 #include <inttypes.h>
 
 #ifdef _WIN32
@@ -39,6 +40,9 @@ ENTRY int fixture_read(const unsigned char *value)
 ENTRY int64_t fixture_wide(int64_t value) { body_calls++; return value + INT64_C(1099511627776); }
 ENTRY const char *fixture_pointer(void) { body_calls++; return "original"; }
 ENTRY void fixture_void(uint64_t *value) { body_calls++; *value = 123; }
+ENTRY double fixture_addd(double a, double b) { body_calls++; return a + b; }
+ENTRY float fixture_mulf(float a, float b) { body_calls++; return a * b; }
+ENTRY int fixture_errno_set(int code) { body_calls++; errno = code; return 7; }
 
 struct vg_slot {
     uint64_t start;
@@ -70,6 +74,28 @@ int main(void)
             struct vg_slot slot = {0, 0};
             fixture_finish(&slot);
             printf("{\"end\":%" PRIu64 ",\"body_calls\":%u}\n", slot.end, body_calls);
+            continue;
+        }
+        if (strncmp(line, "addd", 4) == 0) {
+            double a = 0.0, b = 0.0;
+            sscanf(line, "addd %lf %lf", &a, &b);
+            double result = fixture_addd(a, b);
+            printf("{\"result\":%.17g,\"body_calls\":%u}\n", result, body_calls);
+            continue;
+        }
+        if (strncmp(line, "mulf", 4) == 0) {
+            float a = 0.0f, b = 0.0f;
+            sscanf(line, "mulf %f %f", &a, &b);
+            float result = fixture_mulf(a, b);
+            printf("{\"result\":%.9g,\"body_calls\":%u}\n", (double)result, body_calls);
+            continue;
+        }
+        if (strncmp(line, "errno", 5) == 0) {
+            int code = 0;
+            sscanf(line, "errno %d", &code);
+            int result = fixture_errno_set(code);
+            int saved = errno;
+            printf("{\"result\":%d,\"errno\":%d,\"body_calls\":%u}\n", result, saved, body_calls);
             continue;
         }
         uint64_t key = 0;

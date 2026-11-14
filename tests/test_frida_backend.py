@@ -63,8 +63,8 @@ class LiveFixture:
         self.events.append(message)
         self.messages.put(message)
 
-    def install(self, config=None):
-        return self.script.exports_sync.install(config or self.config, self.catalog)
+    def install(self, config=None, catalog=None):
+        return self.script.exports_sync.install(config or self.config, catalog or self.catalog)
 
     def probe(self, config=None, catalog=None):
         return self.script.exports_sync.probe(config or self.config, catalog or self.catalog)
@@ -232,8 +232,8 @@ def test_bad_bytecode_rejected_before_hooks(live):
 
 
 @pytest.mark.parametrize('field,value,reason', [
-    ('return_type', 'double', 'unsupported return ABI'),
-    ('arg_types', ['double'], 'unsupported argument ABI'),
+    ('return_type', 'vector', 'unsupported return ABI'),
+    ('arg_types', ['struct_foo'], 'unsupported argument ABI'),
     ('action_id', 'missing', 'missing catalog action'),
     ('block_return', -9, 'must reference catalog'),
     ('step_limit', 0, 'invalid step limit'),
@@ -384,7 +384,7 @@ def test_probe_reports_invalid_offset(live):
 
 def test_probe_reports_unsupported_return(live):
     config = copy.deepcopy(live.config)
-    config['guards'][0]['return_type'] = 'float'
+    config['guards'][0]['return_type'] = 'vector'
     assert 'E_RETURN_UNSUPPORTED' in _probe_codes(live.probe(config))
 
 
@@ -426,3 +426,97 @@ def test_probe_reports_already_installed(live):
     result = live.probe()
     assert result['ok'] is False
     assert 'E_ALREADY_INSTALLED' in _probe_codes(result)
+
+BLOCK_BYTECODE = assemble_text('mov64 r0, block\nexit\n')
+PASS_BYTECODE = assemble_text('mov64 r0, pass\nexit\n')
+
+
+def _typed_config(live, symbol, arg_types, return_type, bytecode, action_id):
+    config = copy.deepcopy(live.config)
+    config['guards'] = [{
+        'id': 'typed_guard',
+        'module': live.config['guards'][0]['module'],
+        'symbol': symbol,
+        'arg_types': arg_types,
+        'return_type': return_type,
+        'code': list(bytecode),
+        'action_id': action_id,
+        'step_limit': 4096,
+    }]
+    config['observers'] = []
+    config['maps'] = {}
+    return config
+
+
+def test_double_arguments_and_block_action(live):
+    config = _typed_config(live, 'fixture_addd', ['double', 'double'], 'double',
+                           BLOCK_BYTECODE, 'double_reject')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['double_reject'] = {'kind': 'return_double', 'value': 1.5}
+    assert live.install(config, catalog)['guards'] == 1
+    reply = live.command('addd 1.5 2.5')
+    assert reply['result'] == 1.5
+    assert reply['body_calls'] == 0
+
+
+def test_double_pass_calls_original(live):
+    config = _typed_config(live, 'fixture_addd', ['double', 'double'], 'double',
+                           PASS_BYTECODE, 'double_pass')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['double_pass'] = {'kind': 'return_double', 'value': 0}
+    assert live.install(config, catalog)['guards'] == 1
+    reply = live.command('addd 1.5 2.5')
+    assert reply['result'] == 4.0
+    assert reply['body_calls'] == 1
+
+
+def test_float_block_and_pass(live):
+    config = _typed_config(live, 'fixture_mulf', ['float', 'float'], 'float',
+                           BLOCK_BYTECODE, 'float_reject')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['float_reject'] = {'kind': 'return_float', 'value': 2.5}
+    assert live.install(config, catalog)['guards'] == 1
+    reply = live.command('mulf 2 3')
+    assert abs(reply['result'] - 2.5) < 1e-6
+    assert reply['body_calls'] == 0
+
+
+def test_float_pass_calls_original(live):
+    config = _typed_config(live, 'fixture_mulf', ['float', 'float'], 'float',
+                           PASS_BYTECODE, 'float_pass')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['float_pass'] = {'kind': 'return_float', 'value': 0}
+    assert live.install(config, catalog)['guards'] == 1
+    reply = live.command('mulf 2 3')
+    assert abs(reply['result'] - 6.0) < 1e-6
+    assert reply['body_calls'] == 1
+
+
+def test_errno_preserved_on_pass(live):
+    config = _typed_config(live, 'fixture_errno_set', ['int'], 'int', PASS_BYTECODE, 'errno_pass')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['errno_pass'] = {'kind': 'return_int', 'value': 0}
+    assert live.install(config, catalog)['guards'] == 1
+    reply = live.command('errno 42')
+    assert reply['result'] == 7
+    assert reply['errno'] == 42
+
+
+def test_block_action_sets_errno(live):
+    config = _typed_config(live, 'fixture_errno_set', ['int'], 'int', BLOCK_BYTECODE, 'errno_block')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['errno_block'] = {'kind': 'return_int', 'value': -5, 'errno': 13}
+    assert live.install(config, catalog)['guards'] == 1
+    reply = live.command('errno 42')
+    assert reply['result'] == -5
+    assert reply['errno'] == 13
+
+
+def test_probe_accepts_float_and_double_actions(live):
+    config = _typed_config(live, 'fixture_addd', ['double', 'double'], 'double',
+                           BLOCK_BYTECODE, 'double_reject')
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['double_reject'] = {'kind': 'return_double', 'value': 1.5}
+    result = live.probe(config, catalog)
+    assert result['ok'] is True
+    assert result['errors'] == []
