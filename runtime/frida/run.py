@@ -70,6 +70,8 @@ def main() -> None:
                         help='resolve and validate the bundle without installing hooks')
     parser.add_argument('--smoke-warn-only', action='store_true',
                         help='keep the bundle installed even when the declared smoke check fails')
+    parser.add_argument('--uninstall-timeout-ms', type=float, default=2000.0,
+                        help='how long to wait for callbacks before detaching during uninstall')
     args = parser.parse_args()
     if args.duration is not None and args.duration < 0:
         parser.error('--duration must be nonnegative')
@@ -129,7 +131,7 @@ def main() -> None:
                 try:
                     if script is not None:
                         try:
-                            uninstall_script(script)
+                            uninstall_script(script, timeout_ms=args.uninstall_timeout_ms)
                         except Exception:
                             pass
                         try:
@@ -151,6 +153,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 

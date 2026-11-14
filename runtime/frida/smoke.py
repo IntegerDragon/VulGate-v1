@@ -1,4 +1,4 @@
-"""Post-install smoke verification: trigger the target and require a BLOCK.
+﻿"""Post-install smoke verification: trigger the target and require a BLOCK.
 
 A bundle may declare how to exercise the patched path once:
 
@@ -47,6 +47,9 @@ def validate(spec: dict) -> dict:
     timeout = spec.get('timeout_ms', _DEFAULT_TIMEOUT_MS)
     if not isinstance(timeout, int) or not 0 < timeout <= 60000:
         raise ValueError('smoke timeout_ms must be 1..60000')
+    settle = spec.get('settle_ms', 100)
+    if not isinstance(settle, int) or not 0 <= settle <= 5000:
+        raise ValueError('smoke settle_ms must be 0..5000')
     return spec
 
 
@@ -86,6 +89,9 @@ def run(script, spec: dict | None, pid: int) -> dict:
     if spec is None:
         return {'status': 'installed_unverified', 'code': 'E_SMOKE_NOT_DECLARED', 'blocks': 0}
     validate(spec)
+    settle = spec.get('settle_ms', 100)
+    if settle:
+        time.sleep(settle / 1000)
     try:
         trigger(spec, pid)
     except Exception as error:  # trigger may race with a dying target
@@ -98,3 +104,4 @@ def run(script, spec: dict | None, pid: int) -> dict:
                 'hook': spec.get('hook'), 'blocks': blocks}
     return {'status': 'failed', 'code': 'E_SMOKE_FAILED',
             'hook': spec.get('hook'), 'blocks': blocks}
+

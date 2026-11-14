@@ -97,3 +97,12 @@ def test_classify_roles_two_independent_trees() -> None:
     }
     roles = multiproc.classify_roles(infos)
     assert roles == {10: 'master', 11: 'worker', 20: 'master', 21: 'worker'}
+
+import types
+
+
+def test_same_image_detects_pid_reuse_and_exec() -> None:
+    record = types.SimpleNamespace(starttime=10, exe='/usr/bin/server')
+    assert multiproc.same_image(record, {'starttime': 10, 'exe': '/usr/bin/server'})
+    assert not multiproc.same_image(record, {'starttime': 11, 'exe': '/usr/bin/server'})
+    assert not multiproc.same_image(record, {'starttime': 10, 'exe': '/usr/bin/other'})

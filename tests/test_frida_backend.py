@@ -860,3 +860,17 @@ def test_thread_scoped_observation_records_per_thread(live):
     for scope in scopes:
         values = {item['value'] for item in observations if item['scope'] == scope}
         assert len(values) == 1
+
+def test_failed_multi_guard_install_rolls_back(live):
+    config = copy.deepcopy(live.config)
+    config['maps'] = {'limits': {'capacity': 64}}
+    config['observers'] = []
+    config['guards'] = [copy.deepcopy(live.config['guards'][0]),
+                        copy.deepcopy(live.config['guards'][1])]
+    config['guards'][1]['action_id'] = 'missing_action'
+    with pytest.raises(Exception, match='missing catalog action'):
+        live.install(config)
+    assert live.script.exports_sync.status() == {'installed': False}
+    assert live.command('call 1 5') == {'result': 105, 'body_calls': 1}
+    live.install()
+    assert live.command('call 1 5')['result'] == -73

@@ -160,13 +160,14 @@
 - 原生 shim 调用桥接库在 pthread 上挂起/崩溃；`NativeCallback` 不支持 scheduling 选项；attach 改写 rip/rsp 不生效（无法跳过原函数）。
 - 因此**多线程目标上的门控目前不可用**，不得声称支持；后续方向：原生 shim 静态链接 `runtime/vm.c`、LD_PRELOAD 部署模式、eBPF uprobe 模式。
 
-### WP7 生命周期与失败安全（P1）
+### WP7 生命周期与失败安全（P1）—— 已完成
 
-- 部分安装失败回滚（已有 agent 内 `remove`，需覆盖 probe 后安装阶段）；
-- 卸载：`barrier` 等静默，超时返回 `E_TARGET_BUSY`；
-- 目标崩溃隔离：一个进程崩溃不影响 launcher 与其他进程；
-- 目标被替换（`/proc/pid/exe` 指向 `(deleted)`）与 pid 复用；
-- 验收：注入中途杀目标不留残留；卸载后调用恢复原行为；单进程崩溃其他进程继续。
+- **进程内原子回滚**：agent 先解析全部 guards/observers/动作/规则，再统一替换；任一步失败 `remove()` 撤销已装 hooks。测试：两个 guard 中第二个缺动作 → 安装失败、`status.installed=false`、原函数行为不变、随后可正常安装。
+- **卸载 barrier**：`lifecycle.uninstall` 轮询 `callbacks active`，超时由 `--uninstall-timeout-ms`（默认 2000ms）控制；单测覆盖重试、超时与无关异常传播。
+- **崩溃隔离**：多进程 launcher 中杀掉一个 worker，仅该 pid 报 `detached`，其余 worker 继续产生 BLOCK；summary 无 failures。回归脚本 `verify_lifecycle.sh`。
+- **fail-fast 回滚**：`--fail-fast` 在首次安装失败时中止并卸载全部已装进程，退出码 4；回归脚本验证 `installed=0` 且 summary `fatal` 非空。
+- **目标被替换**：`same_image()` 同时比较 starttime 与 exe 真实路径；不一致发 `replaced` 并重装（exec 后 session 断开也会触发重装）。单测覆盖 pid 复用/换镜像；WP5 respawn 集成测试覆盖顺序新进程。
+- 验收：上述测试与回归脚本在 WSL 实测通过。
 
 ### WP8 观测与运维（P1）
 
@@ -216,7 +217,7 @@
 | WP4 | 完成：manifest `smoke`（signal/exec/none）、安装后自动触发、`stats()` 计数、`installed_verified`/`installed_unverified`/`failed`、失败卸载与 `--smoke-warn-only` |
 | WP5 | 完成：角色推断与 `--role`、spawn 宽限与 master 跳过、安装延迟测量、失败退避重试、starttime pid 复用检测、重启重挂；回归脚本已提交 |
 | WP6 | 部分：卸载静默与线程作用域观测已验证；多线程门控被 Frida replace 回调限制阻塞，证据与后续方向见 `FRIDA_THREAD_SAFETY.md` |
-| WP7 | 部分：agent 安装失败回滚；缺卸载静默/崩溃隔离/pid 复用 |
+| WP7 | 完成：进程内原子回滚、卸载 barrier/超时、崩溃隔离、fail-fast 回滚、starttime+exe 的替换检测；回归脚本已提交 |
 | WP8 | 部分：每进程 decisions/blocks 计数；缺统一指标/熔断/审计 |
 | WP9 | 仅 x86-64 Linux；其他边界仅文档 |
 | WP10 | 部分：install/uninstall/status；缺 check/dry-run/签名/权限指南 |

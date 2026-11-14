@@ -29,11 +29,13 @@ except ImportError:  # direct `python runtime/frida/multiproc.py`
 
 try:
     from .lifecycle import uninstall as uninstall_script
-    from .result import EXIT_OK, EXIT_SMOKE, classify_exception, exit_code_for_summary, summarize_probe
+    from .result import (EXIT_MOUNT, EXIT_OK, EXIT_SMOKE, classify_exception,
+                           exit_code_for_summary, summarize_probe)
     from .smoke import run as run_smoke
 except ImportError:
     from lifecycle import uninstall as uninstall_script
-    from result import EXIT_OK, EXIT_SMOKE, classify_exception, exit_code_for_summary, summarize_probe
+    from result import (EXIT_MOUNT, EXIT_OK, EXIT_SMOKE, classify_exception,
+                        exit_code_for_summary, summarize_probe)
     from smoke import run as run_smoke
 
 ROLE_MODES = ('workers', 'all', 'master', 'helpers')
@@ -190,6 +192,16 @@ def classify_roles(infos: dict[int, dict], helper_markers: tuple[str, ...] = ())
     return roles
 
 
+def same_image(record, info: dict) -> bool:
+    "True when the attached record still describes the target process image."
+    if record.starttime != info.get('starttime'):
+        return False
+    try:
+        return os.path.realpath(record.exe) == os.path.realpath(info['exe'])
+    except OSError:
+        return False
+
+
 def select_by_role(infos: dict[int, dict], roles: dict[int, str], mode: str) -> dict[int, dict]:
     if mode == 'all':
         wanted = {'master', 'worker', 'helper'}
@@ -237,11 +249,11 @@ def attach_and_install(device, info: dict, agent_source: str, config: dict, acti
     return record
 
 
-def uninstall_all(records: list[ProcessInstall]) -> list[int]:
+def uninstall_all(records: list[ProcessInstall], timeout_ms: float = 2000.0) -> list[int]:
     released = []
     for record in records:
         try:
-            uninstall_script(record.script)
+            uninstall_script(record.script, timeout_ms=timeout_ms)
             record.script.unload()
         except Exception:
             pass
@@ -301,6 +313,10 @@ def main() -> None:
                         help='resolve and validate the bundle on every target without installing')
     parser.add_argument('--smoke-warn-only', action='store_true',
                         help='keep the bundle installed even when the declared smoke check fails')
+    parser.add_argument('--uninstall-timeout-ms', type=float, default=2000.0,
+                        help='how long to wait for callbacks before detaching during uninstall')
+    parser.add_argument('--fail-fast', action='store_true',
+                        help='stop and roll back all processes after the first install failure')
     args = parser.parse_args()
     if args.interval <= 0:
         parser.error('--interval must be positive')
@@ -338,6 +354,7 @@ def main() -> None:
     retry_count = 0
     late_installs = 0
     smoke_failed = False
+    fatal_error = ''
     effect_counts = {'installed_verified': 0, 'installed_unverified': 0, 'failed': 0}
     role_counts: dict[str, int] = {}
     lock = threading.Lock()
@@ -422,6 +439,7 @@ def main() -> None:
     started = time.monotonic()
     spawned_resumed = False
     spawn_has_children = False
+    abort = False
     try:
         while True:
             if args.duration is not None and time.monotonic() - started >= args.duration:
@@ -433,10 +451,11 @@ def main() -> None:
                     retry_count += 1
             for pid, info in sorted(target_infos().items()):
                 if pid in records:
-                    if records[pid].starttime != info.get('starttime'):
+                    replaced = not same_image(records[pid], info)
+                    if replaced:
                         stale = records.pop(pid)
                         try:
-                            uninstall_script(stale.script)
+                            uninstall_script(stale.script, timeout_ms=args.uninstall_timeout_ms)
                             stale.script.unload()
                         except Exception:
                             pass
@@ -444,7 +463,7 @@ def main() -> None:
                             stale.session.detach()
                         except Exception:
                             pass
-                        detached_pids.add(pid)
+                            detached_pids.add(pid)
                         emit({'event': 'replaced', 'pid': pid, 'exe': info['exe']})
                     else:
                         continue
@@ -460,6 +479,10 @@ def main() -> None:
                                      'next_at': time.monotonic() + args.retry_delay}
                     emit({'event': 'install-failed', 'pid': pid, 'exe': info['exe'],
                           'attempts': failures[pid]['attempts'], 'error': str(error)})
+                    if args.fail_fast:
+                        fatal_error = str(error)
+                        abort = True
+                        break
                     continue
                 record.latency_ms = (time.monotonic() - first_seen[pid]) * 1000.0
                 record.window_exceeded = (args.max_install_latency_ms is not None and
@@ -483,7 +506,7 @@ def main() -> None:
                 if status == 'failed' and not args.smoke_warn_only:
                     smoke_failed = True
                     try:
-                        uninstall_script(record.script)
+                        uninstall_script(record.script, timeout_ms=args.uninstall_timeout_ms)
                         record.script.unload()
                     except Exception:
                         pass
@@ -496,6 +519,12 @@ def main() -> None:
                                      'next_at': float('inf')}
                     emit({'event': 'install-failed', 'pid': pid, 'exe': info['exe'],
                           'error': 'E_SMOKE_FAILED'})
+                    if args.fail_fast:
+                        fatal_error = 'E_SMOKE_FAILED'
+                        abort = True
+                        break
+            if abort:
+                break
             if spawned_pid is not None and not spawned_resumed:
                 # --role workers skips the master; resume it anyway so it can fork.
                 try:
@@ -516,7 +545,7 @@ def main() -> None:
         pass
     finally:
         active = list(records.values())
-        released = uninstall_all(active)
+        released = uninstall_all(active, args.uninstall_timeout_ms)
         for record in active:
             emit({'event': 'uninstalled', 'pid': record.pid, 'role': record.role,
                   'decisions': record.decisions, 'blocks': record.blocks,
@@ -532,6 +561,7 @@ def main() -> None:
             'late_installs': late_installs,
             'retries': retry_count,
             'smoke_failed': smoke_failed,
+            'fatal': fatal_error or None,
         }
         emit(summary)
         if args.summary:
@@ -541,9 +571,12 @@ def main() -> None:
                 device.kill(spawned_pid)
             except Exception:
                 pass
-    sys.exit(EXIT_SMOKE if smoke_failed else EXIT_OK)
+    sys.exit(EXIT_MOUNT if fatal_error else (EXIT_SMOKE if smoke_failed else EXIT_OK))
 
 
 if __name__ == '__main__':
     main()
+
+
+
 
