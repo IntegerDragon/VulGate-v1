@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 // Explicit observations and catalog-bound returns; decisions remain in the VM.
 // The policy is interpreted by runtime/vm.c, never by JavaScript predicates.
@@ -476,15 +476,16 @@ rpc.exports = {
         requireThat(Array.isArray(config.guards) && config.guards.length > 0 &&
             Array.isArray(config.observers), 'guards and observers are required');
         const library = Module.load(config.bridge);
-        const native = (name, ret, args) => new NativeFunction(
-            library.getExportByName(name), ret, args, {scheduling: 'exclusive'});
+        // Cooperative scheduling: replacement callbacks run on target threads and
+        // must not take exclusive JS access while other threads may be entering.
+        const native = (name, ret, args) => new NativeFunction(library.getExportByName(name), ret, args);
         requireThat(native('vg_abi_version', 'uint', [])() === 1, 'bridge ABI mismatch');
         const create = native('vg_program_create', 'pointer', ['pointer', 'uint']);
         const run = native('vg_run', 'int', ['pointer', 'pointer', 'pointer', 'uint', 'pointer']);
         const lastReadCount = native('vg_last_read_count', 'uint', []);
         const copyLastReads = native('vg_copy_last_reads', 'uint', ['pointer', 'uint']);
         const state = {hooks: [], handles: [], callbacks: [], active: 0, maps: new Map(),
-            argStacks: new Map(), guardStats: [], calls: 0,
+            argStacks: new Map(), guardStats: [], reentryDepth: new Map(), calls: 0,
             destroy: native('vg_program_destroy', 'void', ['pointer'])};
         const mapCreate = native('vg_map_create', 'pointer', ['uint']);
         const mapSet = native('vg_map_set', 'int', ['pointer', 'uint64', 'uint64', 'uint64']);
@@ -583,7 +584,7 @@ rpc.exports = {
                     requireThat(Number.isSafeInteger(offset) && offset >= 0, 'invalid return offset');
                     return Process.getModuleByName(spec.module).base.add(offset).toString();
                 }));
-                spec.stats = {calls: 0, blocks: 0};
+                spec.stats = {calls: 0, blocks: 0, reentries: 0};
                 return {spec, target, action, handle, original, limit, returnFilter, isShim};
             });
             state.guardStats = guards.map(item => ({id: item.spec.id, stats: item.spec.stats}));
@@ -692,9 +693,9 @@ rpc.exports = {
                             for (let i = 0; i < spec.arg_types.length; i++)
                                 saved.push(ptr(args[i].toString()));
                             this.savedArgs = saved;
-                            this.savedThread = this.threadId;
+                            this.savedThread = Process.getCurrentThreadId();
                             if (anchorOffsets.length) {
-                                const key = String(this.threadId);
+                                const key = String(Process.getCurrentThreadId());
                                 let stack = state.argStacks.get(key);
                                 if (!stack) {
                                     stack = [];
@@ -704,7 +705,7 @@ rpc.exports = {
                             }
                             return;
                         }
-                        recordObservation(spec, args, this.context, this.threadId);
+                        recordObservation(spec, args, this.context, Process.getCurrentThreadId());
                     },
                     onLeave() {
                         if (spec.anchor === 'function_exit' || spec.anchor_fallback_leave)
@@ -726,13 +727,13 @@ rpc.exports = {
                     try {
                         const extra = Interceptor.attach(site, {
                             onEnter() {
-                                const stack = state.argStacks.get(String(this.threadId)) || [];
+                                const stack = state.argStacks.get(String(Process.getCurrentThreadId())) || [];
                                 const saved = stack[stack.length - 1];
                                 if (!saved) {
                                     send({event: 'diagnostic', hook: spec.id, reason: 'observation_anchor_unbound'});
                                     return;
                                 }
-                                recordObservation(spec, saved, this.context, this.threadId);
+                                recordObservation(spec, saved, this.context, Process.getCurrentThreadId());
                             }
                         });
                         used.add(site.toString());
@@ -761,6 +762,19 @@ rpc.exports = {
                     continue;
                 }
                 const callback = new NativeCallback(function (...args) {
+                    const threadKey = String(Process.getCurrentThreadId());
+                    const depth = state.reentryDepth.get(threadKey) || 0;
+                    if (depth > 0) {
+                        // The hook re-entered itself on this thread; forward the
+                        // original call instead of recursing through the VM.
+                        spec.stats.reentries++;
+                        if (original === null) return action ? action(args) : undefined;
+                        const nested = original(...args);
+                        if (Process.platform === 'windows') this.lastError = nested.lastError;
+                        else this.errno = nested.errno;
+                        return nested.value;
+                    }
+                    state.reentryDepth.set(threadKey, depth + 1);
                     state.active++;
                     try {
                         if (returnFilter && !returnFilter.has(this.returnAddress.toString())) {
@@ -791,11 +805,11 @@ rpc.exports = {
                                     (ref.key_arg === undefined ? uint64(0) :
                                         bits(args[ref.key_arg], spec.arg_types[ref.key_arg]));
                                 const map = state.maps.get(ref.map);
-                                const scopeText = String(map.threadScoped ? this.threadId : 0);
+                                const scopeText = String(map.threadScoped ? Process.getCurrentThreadId() : 0);
                                 if (map.invalidScopes.has(scopeText))
                                     throw new Error('observation_scope_invalid:' + ref.map);
                                 if (map.fullScopes.has(scopeText)) mapFull = true;
-                                const scopeWord = uint64(map.threadScoped ? this.threadId : 0);
+                                const scopeWord = uint64(map.threadScoped ? Process.getCurrentThreadId() : 0);
                                 let found;
                                 let shown = '0';
                                 if ((ref.words || 1) > 1) {
@@ -885,6 +899,9 @@ rpc.exports = {
                         return result.value;
                     } finally {
                         state.active--;
+                        const remaining = (state.reentryDepth.get(threadKey) || 1) - 1;
+                        if (remaining <= 0) state.reentryDepth.delete(threadKey);
+                        else state.reentryDepth.set(threadKey, remaining);
                     }
                 }, spec.return_type, spec.arg_types);
                 state.callbacks.push(callback); // Keep replacement trampolines alive.
@@ -924,3 +941,7 @@ rpc.exports = {
         return {installed: false};
     }
 };
+
+
+
+

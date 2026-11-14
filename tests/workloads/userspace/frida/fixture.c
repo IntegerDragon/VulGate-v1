@@ -7,7 +7,12 @@
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <inttypes.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #ifdef _WIN32
 #define ENTRY __declspec(dllexport) __attribute__((noinline))
@@ -51,6 +56,76 @@ ENTRY int fixture_errno_set(int code) { body_calls++; errno = code; return 7; }
 ENTRY int fixture_output(uint64_t *out) { body_calls++; if (out) *out = 5; return 0; }
 ENTRY int fixture_mark(int value) { marked += value; return value; }
 ENTRY int fixture_marks(void) { return marked; }
+
+ENTRY int fixture_recurse(int depth)
+{
+    body_calls++;
+    if (depth <= 0) return 7;
+    return fixture_recurse(depth - 1) + 1;
+}
+
+ENTRY int fixture_sleepy(int ms)
+{
+    body_calls++;
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    usleep((useconds_t)ms * 1000);
+#endif
+    return 0;
+}
+
+typedef struct {
+    int index;
+    int iterations;
+} fixture_thread_job;
+
+static fixture_thread_job thread_jobs[32];
+static pthread_t thread_handles[32];
+static atomic_int thread_total;
+static atomic_int thread_blocked;
+static int thread_count;
+static pthread_t sleepy_handle;
+static int sleepy_ms;
+
+static void *fixture_thread_worker(void *arg)
+{
+    fixture_thread_job *job = (fixture_thread_job *)arg;
+    for (int i = 0; i < job->iterations; i++) {
+        fixture_observe(1, (unsigned)job->index);
+        int result = fixture_target(1, (unsigned)job->index);
+        atomic_fetch_add(&thread_total, 1);
+        if (result < 0) atomic_fetch_add(&thread_blocked, 1);
+    }
+    return NULL;
+}
+
+static int start_threads(int count, int iterations)
+{
+    if (count < 0 || count > 32 || iterations < 1) return -1;
+    atomic_store(&thread_total, 0);
+    atomic_store(&thread_blocked, 0);
+    thread_count = count;
+    for (int i = 0; i < count; i++) {
+        thread_jobs[i].index = i;
+        thread_jobs[i].iterations = iterations;
+        if (pthread_create(&thread_handles[i], NULL, fixture_thread_worker, &thread_jobs[i]) != 0)
+            return -1;
+    }
+    return count;
+}
+
+static void join_threads(void)
+{
+    for (int i = 0; i < thread_count; i++) pthread_join(thread_handles[i], NULL);
+}
+
+static void *fixture_sleepy_worker(void *arg)
+{
+    (void)arg;
+    (void)fixture_sleepy(sleepy_ms);
+    return NULL;
+}
 
 struct vg_slot {
     uint64_t start;
@@ -157,6 +232,45 @@ int main(void)
         }
         if (strncmp(line, "marks", 5) == 0) {
             printf("{\"marked\":%d,\"body_calls\":%u}\n", fixture_marks(), body_calls);
+            continue;
+        }
+        if (strncmp(line, "threads_start", 13) == 0) {
+            int count = 0, iterations = 0;
+            sscanf(line, "threads_start %d %d", &count, &iterations);
+            int started = start_threads(count, iterations);
+            printf("{\"started\":%d,\"body_calls\":%u}\n", started, body_calls);
+            continue;
+        }
+        if (strncmp(line, "threads_wait", 12) == 0) {
+            join_threads();
+            printf("{\"total\":%d,\"blocked\":%d,\"body_calls\":%u}\n",
+                   atomic_load(&thread_total), atomic_load(&thread_blocked), body_calls);
+            continue;
+        }
+        if (strncmp(line, "threads ", 8) == 0) {
+            int count = 0, iterations = 0;
+            sscanf(line, "threads %d %d", &count, &iterations);
+            if (start_threads(count, iterations) >= 0) join_threads();
+            printf("{\"total\":%d,\"blocked\":%d,\"body_calls\":%u}\n",
+                   atomic_load(&thread_total), atomic_load(&thread_blocked), body_calls);
+            continue;
+        }
+        if (strncmp(line, "sleepy_start", 12) == 0) {
+            sscanf(line, "sleepy_start %d", &sleepy_ms);
+            pthread_create(&sleepy_handle, NULL, fixture_sleepy_worker, NULL);
+            printf("{\"started\":true,\"ms\":%d}\n", sleepy_ms);
+            continue;
+        }
+        if (strncmp(line, "sleepy_wait", 11) == 0) {
+            pthread_join(sleepy_handle, NULL);
+            printf("{\"body_calls\":%u}\n", body_calls);
+            continue;
+        }
+        if (strncmp(line, "recurse", 7) == 0) {
+            int depth = 0;
+            sscanf(line, "recurse %d", &depth);
+            int result = fixture_recurse(depth);
+            printf("{\"result\":%d,\"body_calls\":%u}\n", result, body_calls);
             continue;
         }
         if (strncmp(line, "pair", 4) == 0) {

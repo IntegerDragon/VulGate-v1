@@ -10,10 +10,12 @@ import sys
 import threading
 
 try:
+    from .lifecycle import uninstall as uninstall_script
     from .result import EXIT_OK, EXIT_SMOKE, classify_exception, classify_probe
     from .smoke import run as run_smoke, validate as validate_smoke
 except ImportError:  # direct `python runtime/frida/run.py`
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from lifecycle import uninstall as uninstall_script
     from result import EXIT_OK, EXIT_SMOKE, classify_exception, classify_probe
     from smoke import run as run_smoke, validate as validate_smoke
 
@@ -127,7 +129,7 @@ def main() -> None:
                 try:
                     if script is not None:
                         try:
-                            script.exports_sync.uninstall()
+                            uninstall_script(script)
                         except Exception:
                             pass
                         try:
@@ -149,5 +151,6 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 

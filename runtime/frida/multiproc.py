@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Install one VulGate bundle into every matching userspace process.
 
 Unlike run.py (a single --pid or one --spawn), this launcher keeps scanning for
@@ -28,9 +28,11 @@ except ImportError:  # direct `python runtime/frida/multiproc.py`
     from run import load_bundle
 
 try:
+    from .lifecycle import uninstall as uninstall_script
     from .result import EXIT_OK, EXIT_SMOKE, classify_exception, exit_code_for_summary, summarize_probe
     from .smoke import run as run_smoke
 except ImportError:
+    from lifecycle import uninstall as uninstall_script
     from result import EXIT_OK, EXIT_SMOKE, classify_exception, exit_code_for_summary, summarize_probe
     from smoke import run as run_smoke
 
@@ -239,7 +241,7 @@ def uninstall_all(records: list[ProcessInstall]) -> list[int]:
     released = []
     for record in records:
         try:
-            record.script.exports_sync.uninstall()
+            uninstall_script(record.script)
             record.script.unload()
         except Exception:
             pass
@@ -434,7 +436,7 @@ def main() -> None:
                     if records[pid].starttime != info.get('starttime'):
                         stale = records.pop(pid)
                         try:
-                            stale.script.exports_sync.uninstall()
+                            uninstall_script(stale.script)
                             stale.script.unload()
                         except Exception:
                             pass
@@ -481,7 +483,7 @@ def main() -> None:
                 if status == 'failed' and not args.smoke_warn_only:
                     smoke_failed = True
                     try:
-                        record.script.exports_sync.uninstall()
+                        uninstall_script(record.script)
                         record.script.unload()
                     except Exception:
                         pass
@@ -544,3 +546,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+

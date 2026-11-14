@@ -764,3 +764,99 @@ def test_multiproc_reports_smoke_status(package, tmp_path):
     summaries = [json.loads(line) for line in result.stdout.splitlines()
                  if line.startswith('{') and '"summary"' in line]
     assert summaries and summaries[-1]['effects']['installed_verified'] == 1
+
+from runtime.frida import lifecycle
+
+_skip_threads = pytest.mark.skipif(os.name == 'nt', reason='pthread fixture tests run on Linux')
+THREAD_SCOPE_RULE = assemble_text(
+    'mov64 r1, 0\n'
+    'call get_reg\n'
+    'mov64x r6, r0\n'
+    'mov64 r7, 2\n'
+    'raw 0x2d, 0x76, 2, 0\n'
+    'mov64 r0, pass\n'
+    'exit\n'
+    'mov64 r0, block\n'
+    'exit\n'
+)
+
+
+def _simple_guard(live, symbol, arg_types, return_type, bytecode, action_id):
+    config = copy.deepcopy(live.config)
+    config['maps'] = {}
+    config['observers'] = []
+    config['guards'] = [{
+        'id': 'concurrency_guard',
+        'module': live.config['guards'][0]['module'],
+        'symbol': symbol,
+        'arg_types': arg_types,
+        'return_type': return_type,
+        'code': list(bytecode),
+        'action_id': action_id,
+        'step_limit': 4096,
+    }]
+    return config
+
+
+@_skip_threads
+def test_uninstall_waits_for_quiet_callbacks(live):
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['sleepy_pass'] = {'kind': 'return_int', 'value': 0}
+    config = _simple_guard(live, 'fixture_sleepy', ['int'], 'int', PASS_BYTECODE, 'sleepy_pass')
+    assert live.install(config, catalog)['guards'] == 1
+    live.command('sleepy_start 400')
+    time.sleep(0.05)
+    with pytest.raises(Exception, match='callbacks active'):
+        live.script.exports_sync.uninstall()
+    assert live.command('sleepy_wait')['body_calls'] >= 1
+    lifecycle.uninstall(live.script, timeout_ms=2000)
+    assert live.script.exports_sync.status() == {'installed': False}
+
+
+
+
+@_skip_threads
+def test_thread_scoped_observation_records_per_thread(live):
+    config = copy.deepcopy(live.config)
+    config['telemetry'] = True
+    config['maps'] = {'limits': {'capacity': 64, 'thread_scoped': True}}
+    config['observers'] = [{
+        'id': 'thread_value',
+        'module': live.config['guards'][0]['module'],
+        'symbol': 'fixture_observe',
+        'arg_types': ['uint64', 'uint'],
+        'map': 'limits',
+        'operation': 'set',
+        'key_arg': 0,
+        'value_arg': 1,
+    }]
+    config['guards'] = [{
+        'id': 'idle_guard',
+        'module': live.config['guards'][0]['module'],
+        'symbol': 'fixture_mulf',
+        'arg_types': ['float', 'float'],
+        'return_type': 'float',
+        'code': list(PASS_BYTECODE),
+        'action_id': 'idle_action',
+        'step_limit': 4096,
+    }]
+    catalog = copy.deepcopy(live.catalog)
+    catalog['actions']['idle_action'] = {'kind': 'return_float', 'value': 0}
+    assert live.install(config, catalog)['guards'] == 1
+    reply = live.command('threads 2 5')
+    assert reply['total'] == 10
+    observations = []
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and len(observations) < 10:
+        try:
+            message = live.messages.get(timeout=0.2)
+        except Exception:
+            continue
+        payload = message.get('payload') or {}
+        if payload.get('event') == 'observation' and payload.get('map') == 'limits':
+            observations.append(payload)
+    scopes = {item['scope'] for item in observations}
+    assert len(scopes) >= 2
+    for scope in scopes:
+        values = {item['value'] for item in observations if item['scope'] == scope}
+        assert len(values) == 1

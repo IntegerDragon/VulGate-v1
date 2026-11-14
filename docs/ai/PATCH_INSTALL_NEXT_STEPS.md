@@ -148,12 +148,17 @@
 - 验收：`--role workers` 只装 3 个 worker（master 跳过）；`--role all` 装 1 master + 3 worker；respawn 模式下顺序出现的两个 worker 都被重新安装；延迟阈值能标记 `late_installs`。回归脚本：`tests/workloads/userspace/frida/verify_multiproc_roles.sh`。
 - 限制：helper 识别依赖命令行标记；“首请求前”只测量不强制；fork 不 exec 的子进程继承 inline hook 的 Frida 限制仍在（本实现只逐进程安装新进程）。
 
-### WP6 线程与并发安全（P0）
+### WP6 线程与并发安全（P0）—— 部分完成（多线程门控受 Frida 限制阻塞）
 
-- 替换期间的静默：定义 `Interceptor.replace` 与并发调用的关系，必要时用 `barrier`/暂停窗口；
-- 多线程并发命中：决策计数、map 线程作用域、无数据竞争（桥内状态需线程安全或按线程隔离）；
-- 重入：hook 调用的函数又被同一 hook 命中时的递归保护；
-- 验收：多线程压测（≥8 线程、≥100k 次调用）无崩溃、无丢失决策、计数一致。
+已实现并验证：
+- **卸载静默**：`runtime/frida/lifecycle.py` 在卸载时轮询 `callbacks active`，等回调退出后再撤销；`run.py`/`multiproc.py` 的卸载路径统一使用它。单元测试覆盖重试、超时、异常传播。
+- **线程作用域观测**：`Interceptor.attach` 观察点在 pthread 上工作正常；线程作用域 map 的每条记录带独立 scope，已用 2 线程 telemetry 测试验证“每线程一个值”。
+- **重入保护**：agent 增加每线程重入深度，重入时直接转发原函数（不再次进 VM）；该逻辑已实现，但在 replace 回调递归场景下无法可靠验证（见限制）。
+
+阻塞项（详见 `docs/ai/FRIDA_THREAD_SAFETY.md`）：
+- Frida 17.26.2 的 `Interceptor.replace` + `NativeCallback` 在非主线程上执行稍复杂 JS（分配、send、Frida API）会 SIGSEGV；仅常量返回可用。
+- 原生 shim 调用桥接库在 pthread 上挂起/崩溃；`NativeCallback` 不支持 scheduling 选项；attach 改写 rip/rsp 不生效（无法跳过原函数）。
+- 因此**多线程目标上的门控目前不可用**，不得声称支持；后续方向：原生 shim 静态链接 `runtime/vm.c`、LD_PRELOAD 部署模式、eBPF uprobe 模式。
 
 ### WP7 生命周期与失败安全（P1）
 
@@ -210,7 +215,7 @@
 | WP3 | 完成：多字段写、输出参数初始化、`calls` 清理/组合动作、`once` 幂等、写前范围检查与诊断、probe 校验 |
 | WP4 | 完成：manifest `smoke`（signal/exec/none）、安装后自动触发、`stats()` 计数、`installed_verified`/`installed_unverified`/`failed`、失败卸载与 `--smoke-warn-only` |
 | WP5 | 完成：角色推断与 `--role`、spawn 宽限与 master 跳过、安装延迟测量、失败退避重试、starttime pid 复用检测、重启重挂；回归脚本已提交 |
-| WP6 | 未知：无并发压测，桥状态线程安全未验证 |
+| WP6 | 部分：卸载静默与线程作用域观测已验证；多线程门控被 Frida replace 回调限制阻塞，证据与后续方向见 `FRIDA_THREAD_SAFETY.md` |
 | WP7 | 部分：agent 安装失败回滚；缺卸载静默/崩溃隔离/pid 复用 |
 | WP8 | 部分：每进程 decisions/blocks 计数；缺统一指标/熔断/审计 |
 | WP9 | 仅 x86-64 Linux；其他边界仅文档 |
