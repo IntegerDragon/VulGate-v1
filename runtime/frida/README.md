@@ -76,3 +76,27 @@ python build/frida/run.py --pid PID \
 - Windows、Linux、macOS 各有内存读取实现；实测平台和版本见测试回执。
 
 导出可运行包：`make export-frida`。脱离源码目录运行时，使用包内的 `run.py`、manifest 和动作目录。
+
+## 多进程安装
+
+`runtime/frida/multiproc.py` 把同一份补丁分别安装到每个匹配的进程，适合
+master/worker 模型（nginx、httpd prefork、PHP-FPM）：
+
+```sh
+# 由本进程托管启动目标，并跟随它 fork/exec 出的子进程
+python -m runtime.frida.multiproc --manifest M --catalog C \
+  --spawn /usr/sbin/nginx --arg -g --arg 'daemon off;'
+
+# 周期性扫描 /proc，把补丁装到之后才出现的进程
+python -m runtime.frida.multiproc --manifest M --catalog C \
+  --exe /usr/sbin/nginx --interval 0.02 --duration 30
+
+# 直接指定若干个进程
+python -m runtime.frida.multiproc --manifest M --catalog C --pid 1234 --pid 1235
+```
+
+- 每个进程独立会话、独立字节码句柄、独立安装回执；结束时打印 `summary` 并卸载。
+- 进程权限：Linux Yama `ptrace_scope=1` 时只能注入本进程启动的进程树；注入已运行进程需要 root 或 `CAP_SYS_PTRACE`。
+- fork 后不 exec 的子进程会继承 inline hook，Frida 不保证继承后的钩子可用；这类目标应由 launcher 启动并在 worker 出现时逐个安装，或由目标 exec 出 worker。
+- 回归脚本：`bash tests/workloads/userspace/frida/verify_multiproc.sh`（Linux，需 frida Python 模块）。
+
