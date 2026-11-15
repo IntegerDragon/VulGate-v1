@@ -17,10 +17,17 @@
 #include "funchook.h"
 #include "stw.c"
 
+#ifdef VG_RULE_PASS
+static const unsigned char block_code[] = {
+    0xb7, 0, 0, 0, 0, 0, 0, 0,
+    0x95, 0, 0, 0, 0, 0, 0, 0
+};
+#else
 static const unsigned char block_code[] = {
     0xb7, 0, 0, 0, 1, 0, 0, 0,
     0x95, 0, 0, 0, 0, 0, 0, 0
 };
+#endif
 
 static shadow_program program;
 static _Atomic int program_ready = 0;
@@ -235,6 +242,7 @@ int test_set_threads(const char *csv)
     stw_set_known_threads(tids, count);
     return count;
 }
+
 
 
 

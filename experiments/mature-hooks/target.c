@@ -11,7 +11,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifndef THREADS
 #define THREADS 4
+#endif
 
 static _Atomic unsigned long long total_calls;
 static _Atomic unsigned long long blocked_calls;

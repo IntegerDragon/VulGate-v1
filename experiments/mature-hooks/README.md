@@ -81,6 +81,20 @@
 - 信号停车要求目标线程可被信号打断（长时间不可中断睡眠/屏蔽该信号会超时）；
 - funchook 的 trampoline 在卸载后**故意不释放**（避免线程仍在 trampoline 中时被 free 成 SIGSEGV），会带来每次 patch 的少量内存泄漏；生产需做 trampoline 范围跟踪后再安全释放。
 
+### 单次 live 安装/卸载验证（非高频）
+
+用 `single_install.py` 模拟正常生产用法：4 个 worker 持续调用 → 安装一次 → 观察 50ms → 卸载一次 → 观察 50ms → 主线程调用确认恢复 105 → 退出；每个模式重复 20 个进程。
+
+| 模式 | 结果 | 说明 |
+|---|---|---|
+| **BLOCK** | **17/20 成功** | 安装/生效/卸载/恢复均正确；3 次失败都是**进程退出阶段** SIGSEGV/SIGTRAP（-11/-5），不是 patch 逻辑错误 |
+| **PASS** | **0/3 ~ 1/3 成功** | live 下 PASS 路径会崩溃；把 worker 暂停后 PASS 单次调用正常（返回 105 且原函数执行） |
+
+结论：
+
+- **单次 live BLOCK 补丁基本可用**，剩余问题是退出阶段崩溃（需要继续定位 detach/信号清理）；
+- **PASS 路径在 live 多线程下不可用**（即使 1 个 worker 也常崩），怀疑 funchook 的 `real_target` trampoline 在并发调用/长跑下存在重入或重定位问题；quiesced 下正常。生产若需要 PASS 语义，必须换用自建 trampoline 或改用 plthook/preload。
+
 ## 结论
 
 1. **inline hook 库（funchook）不能直接用于“线程运行中”的热安装/卸载**；必须配合 stop-the-world。funchook 自身不提供，需要我们在注入器/agent 里实现。
