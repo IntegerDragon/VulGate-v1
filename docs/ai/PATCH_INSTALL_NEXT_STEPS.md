@@ -194,6 +194,20 @@ Frida attach 路径限制（详见 `docs/ai/FRIDA_THREAD_SAFETY.md`）：
 - **权限指南/systemd/容器**：`PLATFORM_AND_LIMITS.md` + `deploy/README.md` + `deploy/vulgate-frida.service`（仅 `CAP_SYS_PTRACE`、`NoNewPrivileges`、控制 socket 与事件日志）。
 - 限制：签名为共享密钥 HMAC（非对称签名未做）；未在真实 nginx/httpd/PHP 二进制上执行 WP9/WP10 流程（v1 无 benchmark 构建）。
 
+## 3.0 补丁 DSL 层（`runtime/dsl`）
+
+面向“输入补丁 → 挂载运行”的声明式前端：
+
+- DSL 格式：`挂载点`（`位置` / `性质` / `行为`）+ `动作`；
+- 编译器把行为编译成 Frida `NativeCallback` agent，PASS 用 `SystemFunction` 调原函数，
+  BLOCK 执行动作；
+- 20 个 CVE 的 DSL 位于 `runtime/dsl/patches/*.vg`，由 `runtime/dsl/generate20.py`
+  从 `build/declarative20-specs` 生成；
+- 验证：`runtime/dsl/validate20.py` 用合成 fixture 验证 BLOCK/PASS/真实内存读取；
+  服务器实测 **28/28 场景通过**；
+- 限制：Frida 单线程路径、结构体返回/动作 writes/真实 callsite 未接入，详见
+  `runtime/dsl/README.md`。
+
 ## 3.1 原生后端（bundle 驱动，Frida Python 注入）
 
 `runtime/native/` 提供两个从现有 bundle/action catalog 生成的原生后端：
