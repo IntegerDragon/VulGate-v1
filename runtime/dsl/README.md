@@ -96,12 +96,13 @@ python -m runtime.dsl.validate20 --json /tmp/dsl20.json
 服务器 qizhi-51 实测（2026-11-16）：
 
 ```
-30/30 DSL scenarios passed (block + pass)
+28/28 DSL scenarios passed (block + pass)
 ```
 
-其中 20 个 CVE 全部 BLOCK 通过；7 个条件式补丁额外验证 PASS；
-`CVE-2026-93479`（标量参数）、`CVE-2026-109618`（全局符号）、`CVE-2026-47360`（指针字段）
-额外以 memory 模式验证真实内存读取。
+其中 20 个 CVE 全部 BLOCK 通过；6 个条件式补丁额外验证 PASS；
+`CVE-2026-109618`（全局符号）、`CVE-2026-47360`（指针字段）额外以 memory 模式验证真实内存读取。
+`CVE-2026-93479`/`42945`/`9256` 已改为 return-only 挂载（见
+`docs/ai/DSL_RETURN_ONLY_ANALYSIS.md`）。
 
 ## 支持的表达式与动作
 
@@ -117,8 +118,8 @@ python -m runtime.dsl.validate20 --json /tmp/dsl20.json
 - 结构体 by-value/sret 返回暂不支持；
 - `vg_map_get`/`vg_map_present` 目前是占位实现（brotli 观察点的真实 callsite 语义未接入）；
 - 动作的 `writes` 尚未在 DSL 编译器中执行；当前验证以返回值/函数体是否执行为准；
-- 20 例中 3 例以 memory 模式验证（`CVE-2026-93479`/`CVE-2026-109618`/`CVE-2026-47360`）；
-  其余 17 例通过 `vg_sel` 注入 selector 值验证行为分支，编译产物中的内存读取代码未在真实应用上执行；
+- 2 例以 memory 模式验证（`CVE-2026-109618`/`CVE-2026-47360`）；
+  其余 18 例通过 `vg_sel` 注入 selector 值验证行为分支，编译产物中的内存读取代码未在真实应用上执行；
 - 未接入 `runtime/frida` 的 bundle/smoke/metrics/多进程；这是独立的 DSL → Frida 安装路径。
 
 ## 参考

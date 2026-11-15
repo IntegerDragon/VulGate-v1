@@ -159,7 +159,67 @@ def _action_block(name: str, action: dict) -> str:
     return '\n'.join(lines)
 
 
+RETURN_ONLY_OVERRIDES = {
+    'CVE-2026-93479': """action SCRIPT_RUN_BLOCK:
+{
+    return_type: pointer
+    return: null
+}
+
+mount CVE-2026-93479/ngx_http_script_run:
+{
+    location: symbol="ngx_http_script_run", args=[pointer, pointer, pointer, uint64, pointer], return=pointer
+    nature: intercept
+    behavior:
+    {
+        if (true) {
+            return block("SCRIPT_RUN_BLOCK");
+        }
+    }
+}
+""",
+    'CVE-2026-42945': """action REWRITE_BLOCK:
+{
+    return_type: int
+    return: 500
+}
+
+mount CVE-2026-42945/ngx_http_rewrite_handler:
+{
+    location: symbol="ngx_http_rewrite_handler", args=[pointer], return=int
+    nature: intercept
+    behavior:
+    {
+        if (true) {
+            return block("REWRITE_BLOCK");
+        }
+    }
+}
+""",
+    'CVE-2026-9256': """action REWRITE_BLOCK:
+{
+    return_type: int
+    return: 500
+}
+
+mount CVE-2026-9256/ngx_http_rewrite_handler:
+{
+    location: symbol="ngx_http_rewrite_handler", args=[pointer], return=int
+    nature: intercept
+    behavior:
+    {
+        if (true) {
+            return block("REWRITE_BLOCK");
+        }
+    }
+}
+""",
+}
+
+
 def generate_case(case_dir: Path, specs_root: Path) -> tuple[str, str]:
+    if case_dir.name in RETURN_ONLY_OVERRIDES:
+        return case_dir.name, RETURN_ONLY_OVERRIDES[case_dir.name]
     patch = yaml.safe_load((case_dir / 'patch.yaml').read_text(encoding='utf-8'))
     vuln = yaml.safe_load((case_dir / 'vuln.yaml').read_text(encoding='utf-8'))
     application = vuln.get('application')

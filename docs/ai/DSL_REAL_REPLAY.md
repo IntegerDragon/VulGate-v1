@@ -35,3 +35,14 @@ DSL hits = 1
    鏈褰曟槸鐪熷疄搴旂敤閲嶆斁鐨勭涓€姝ャ€?
 ## 涓嬩竴姝?
 1. 涓烘瘡涓?app build 鐢熸垚 offset 琛紝鎵归噺鎶?20 涓?DSL 鐨?`浣嶇疆` 琛ユ垚 module+offset锛?2. 瀹炵幇 action writes锛坋ngine 瀛楁/鍔ㄤ綔鍓綔鐢級锛?3. 鏋勫缓/鎷疯礉 nginx/httpd/PHP/Brotli 鐪熷疄鐩爣锛屽啓 replay harness锛?   - 鍚姩搴旂敤 鈫?Frida 瀹夎 DSL 鈫?鍙戣姹?鎿嶄綔 鈫?姣旇緝 baseline/patched锛?4. 瀵规潯浠惰ˉ涓佹瀯閫犺Е鍙戣姹傦紙alias/uri_changed銆乺egex captures銆乥locked 闃堝€肩瓑锛夈€?
+
+
+## 追加：return-only 转换后的真实重放（2026-11-16）
+
+- CVE-2026-93479：改挂 `ngx_http_script_run`，返回 NULL；
+  `/dynamic/file.txt?dir=www` baseline 200 → patched **500**，hit 1；
+- CVE-2026-42945：改挂 `ngx_http_rewrite_handler`，返回 500；
+  `/rewrite/ordinary` baseline 302 → patched **500**，hit 1；
+- CVE-2026-9256 与 42945 共用同一 return-only 模板。
+
+分析见 `docs/ai/DSL_RETURN_ONLY_ANALYSIS.md`。

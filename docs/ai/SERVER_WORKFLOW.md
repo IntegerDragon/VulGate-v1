@@ -69,7 +69,7 @@ ssh qizhi-51 "cd /kyz/VulGate-v1 && \
 ```
 
 最近一次服务器实测（2026-11-16）：DSL 单测 **5 passed**；20 个 CVE 的 DSL
-**30/30 block/pass/memory 场景通过**。详见 `runtime/dsl/README.md`。
+**28/28 block/pass/memory 场景通过**。详见 `runtime/dsl/README.md`。
 
 > 说明：`runtime/native` 的 plthook/inline 实验测试需要额外的 plthook/funchook 源码目录，服务器当前未安装，
 > 因此不属于本 Frida 版本的验证范围；需要时再单独准备依赖。

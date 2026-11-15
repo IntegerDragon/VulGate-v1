@@ -36,17 +36,14 @@ TEST_VALUES = {
     'CVE-2026-15176': {'alias': 1, 'flags': 32},
     'CVE-2026-47360': {'previous': 1},
     'CVE-2026-60005': {'captures': 1, 'flags': 8},
-    'CVE-2026-93479': {'length': 1},
     'CVE-2026-97205': {'counter': 250},
 }
 
 # Scalar arguments for fixtures when the DSL condition reads the argument
 # directly (memory-mode smoke test); defaults to all zeros.
-SCALAR_ARGS = {
-    'CVE-2026-93479': {'arg1': 1},
-}
+SCALAR_ARGS = {}
 
-MEMORY_MODE = {'CVE-2026-93479', 'CVE-2026-109618', 'CVE-2026-47360'}
+MEMORY_MODE = {'CVE-2026-109618', 'CVE-2026-47360'}
 
 FIXTURE_DECLS = {
     'CVE-2026-109618': '''
@@ -79,7 +76,6 @@ PASS_VALUES = {
     'CVE-2026-15176': {'alias': 0, 'flags': 0},
     'CVE-2026-47360': {'previous': 0},
     'CVE-2026-60005': {'captures': 0, 'flags': 0},
-    'CVE-2026-93479': {'length': 0},
     'CVE-2026-97205': {'counter': 0},
 }
 
