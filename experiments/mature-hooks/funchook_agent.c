@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <sys/uio.h>
 
@@ -29,6 +30,7 @@ static int (*real_target)(int) = 0;
 static void *target_address = 0;
 static unsigned long long blocked_calls = 0;
 static unsigned long long pass_calls = 0;
+static _Atomic int trace_on = 0;
 
 int safe_read(void *dst, const void *src, size_t len)
 {
@@ -39,6 +41,14 @@ int safe_read(void *dst, const void *src, size_t len)
 
 static int guard(int value)
 {
+#ifdef VG_NO_TRACE
+    int trace = 0;
+#else
+    int trace = atomic_load(&trace_on) && (pid_t)syscall(SYS_gettid) == getpid();
+#endif
+    if (trace) {
+        write(2, "G", 1);
+    }
 #ifdef VG_GUARD_SIMPLE
     (void)value;
     blocked_calls++;
@@ -71,11 +81,26 @@ static int guard(int value)
     return -73;
 #endif
 #ifdef VG_GUARD_LOCAL
+    if (trace) {
+        write(2, "V", 1);
+    }
     int decision = run_ebpf_vm(&ctx, &local_program, &policy, &stats);
+    if (trace) {
+        write(2, "D", 1);
+    }
 #else
+    if (trace) {
+        write(2, "V", 1);
+    }
     int decision = run_ebpf_vm(&ctx, &program, &policy, &stats);
+    if (trace) {
+        write(2, "D", 1);
+    }
 #endif
     if (decision != SHADOW_PASS) {
+        if (trace) {
+            write(2, "R", 1);
+        }
         blocked_calls++;
         return -73;
     }
@@ -122,7 +147,12 @@ int test_uninstall(void)
     if (!installed) {
         return 0;
     }
-    if (stw_begin_clean((uintptr_t)target_address, 16, 50) != 0) {
+#ifdef VG_UNINSTALL_ONE
+    int uninstall_attempts = 1;
+#else
+    int uninstall_attempts = 50;
+#endif
+    if (stw_begin_clean((uintptr_t)target_address, 16, uninstall_attempts) != 0) {
         return -2;
     }
     int uninstall_rc = funchook_uninstall(hook, 0);
@@ -130,7 +160,10 @@ int test_uninstall(void)
     if (uninstall_rc != 0) {
         return -1;
     }
-    funchook_destroy(hook);
+    /* Deliberately keep the funchook object and its trampolines alive: a worker may
+     * still be executing the near-trampoline when uninstall restores the target,
+     * and freeing it would turn that into a SIGSEGV. Reusing/freeing safely needs
+     * trampoline range tracking in the STW dirty check. */
     hook = 0;
     installed = 0;
     real_target = (int (*)(int))dlsym(RTLD_DEFAULT, "target_fn");
@@ -168,6 +201,20 @@ __attribute__((visibility("default")))
 int test_guard(int value) { return guard(value); }
 
 __attribute__((visibility("default")))
+int test_cleanup(void)
+{
+    stw_cleanup();
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int test_trace(int on)
+{
+    atomic_store(&trace_on, on ? 1 : 0);
+    return on;
+}
+
+__attribute__((visibility("default")))
 int test_set_threads(const char *csv)
 {
     pid_t tids[STW_MAX_THREADS];
@@ -188,6 +235,10 @@ int test_set_threads(const char *csv)
     stw_set_known_threads(tids, count);
     return count;
 }
+
+
+
+
 
 
 

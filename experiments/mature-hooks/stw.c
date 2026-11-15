@@ -26,6 +26,8 @@ static _Atomic int stw_active;
 static _Atomic int stw_count;
 static pid_t stw_tids[STW_MAX_THREADS];
 static uintptr_t stw_pcs[STW_MAX_THREADS];
+static _Atomic unsigned parked_epoch[STW_MAX_THREADS];
+static uintptr_t parked_pc[STW_MAX_THREADS];
 static pid_t known_tids[STW_MAX_THREADS];
 static int known_count;
 
@@ -119,11 +121,14 @@ static void park_handler(int signal, siginfo_t *info, void *context)
     (void)info;
     unsigned epoch = atomic_load(&stw_epoch);
     pid_t tid = (pid_t)syscall(SYS_gettid);
-    int index = atomic_fetch_add(&stw_count, 1);
-    if (index < STW_MAX_THREADS) {
-        ucontext_t *ucontext = (ucontext_t *)context;
-        stw_tids[index] = tid;
-        stw_pcs[index] = (uintptr_t)ucontext->uc_mcontext.gregs[REG_RIP];
+    ucontext_t *ucontext = (ucontext_t *)context;
+    atomic_fetch_add(&stw_count, 1);
+    for (int index = 0; index < known_count; index++) {
+        if (known_tids[index] == tid) {
+            parked_pc[index] = (uintptr_t)ucontext->uc_mcontext.gregs[REG_RIP];
+            atomic_store(&parked_epoch[index], epoch);
+            break;
+        }
     }
     atomic_fetch_add(&stw_active, 1);
     while (atomic_load(&stw_release_epoch) < epoch) {
@@ -171,27 +176,30 @@ static int stw_begin(uintptr_t range_start, size_t range_size,
         syscall(SYS_tgkill, getpid(), tids[index], STW_SIGNAL);
     }
     uint64_t deadline = now_ms() + STW_TIMEOUT_MS;
-    while (atomic_load(&stw_active) < count && now_ms() < deadline) {
+    for (;;) {
+        int parked = 0;
+        for (int index = 0; index < count; index++) {
+            if (atomic_load(&parked_epoch[index]) == epoch) {
+                parked++;
+            }
+        }
+        if (parked == count || now_ms() >= deadline) {
+            stw_last_expected = (unsigned long long)count;
+            stw_last_active = (unsigned long long)parked;
+            if (parked < count) {
+                atomic_store(&stw_release_epoch, epoch);
+                return -1;
+            }
+            break;
+        }
 #if defined(__x86_64__)
         __asm__ __volatile__("pause");
 #endif
     }
-    if (atomic_load(&stw_active) < count) {
-        atomic_store(&stw_release_epoch, epoch);
-        stw_last_expected = (unsigned long long)count;
-        stw_last_active = (unsigned long long)atomic_load(&stw_active);
-        return -1;
-    }
-    stw_last_expected = (unsigned long long)count;
-    stw_last_active = (unsigned long long)atomic_load(&stw_active);
-    int captured = atomic_load(&stw_count);
-    if (captured > STW_MAX_THREADS) {
-        captured = STW_MAX_THREADS;
-    }
     stw_last_dirty = 0;
     if (dirty_threads) {
-        for (int index = 0; index < captured; index++) {
-            uintptr_t pc = stw_pcs[index];
+        for (int index = 0; index < count; index++) {
+            uintptr_t pc = parked_pc[index];
             if (pc >= range_start && pc < range_start + range_size) {
                 (*dirty_threads)++;
             }
@@ -214,6 +222,23 @@ static void stw_end(void)
 }
 
 /* Park threads until none of them has a PC inside the patch range. */
+/* Called before the injector unloads this library. Pending real-time signals
+ * must not be delivered into unmapped code after dlclose. */
+void stw_cleanup(void)
+{
+    uint64_t deadline = now_ms() + 1000;
+    while (atomic_load(&stw_active) > 0 && now_ms() < deadline) {
+#if defined(__x86_64__)
+        __asm__ __volatile__("pause");
+#endif
+    }
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_IGN;
+    sigemptyset(&action.sa_mask);
+    sigaction(STW_SIGNAL, &action, NULL);
+}
+
 static int stw_begin_clean(uintptr_t range_start, size_t range_size,
                            int max_attempts)
 {
@@ -234,5 +259,7 @@ static int stw_begin_clean(uintptr_t range_start, size_t range_size,
     }
     return -2;
 }
+
+
 
 

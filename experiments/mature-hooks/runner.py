@@ -20,6 +20,7 @@ TARGET = ROOT / 'experiments' / 'mature-hooks' / 'target'
 
 class Target:
     def __init__(self, path: Path = TARGET):
+        self.stderr_text = ''
         self.proc = subprocess.Popen([str(path)], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, bufsize=1)
@@ -55,6 +56,10 @@ class Target:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait()
+        try:
+            self.stderr_text = self.proc.stderr.read()
+        except Exception:
+            self.stderr_text = ''
 
 
 def load_agent(pid: int, library: Path):
@@ -70,6 +75,7 @@ rpc.exports = {
     install: () => fn('test_install', 'int', [])(),
     uninstall: () => fn('test_uninstall', 'int', [])(),
     installed: () => fn('test_installed', 'int', [])(),
+    cleanup: () => fn('test_cleanup', 'int', [])(),
     blocked: () => fn('test_blocked', 'uint64', [])().toNumber(),
     passed: () => fn('test_passed', 'uint64', [])().toNumber(),
     stwRounds: () => fn('test_stw_rounds', 'uint64', [])().toNumber(),
@@ -137,51 +143,50 @@ def test_live(target: Target, script, cycles: int = 20, safe: bool = False) -> d
 
 
 def test_quiesced(target: Target, script, cycles: int = 1) -> dict:
-    """Pause the workers, install, resume to observe BLOCKs, pause, uninstall.
+    """Pause workers, then install/call/uninstall from the main thread.
 
-    The parked workers are used to verify that install/uninstall succeeds while
-    the process is otherwise idle; the actual hook effect is observed through
-    worker counters after resume. (Calling the hooked function from the target's
-    main thread is covered separately by the live mode.)
+    This is the regression for the historical "main-thread call hangs while the
+    hook is installed" bug: with the epoch-based STW protocol the main thread
+    must get -73 from the hooked function and 105 after uninstall.
     """
     print('quiesced: pause', flush=True)
     target.command('pause')
-    before = snapshot(target, script)
+    baseline = target.command('call')
     errors = []
+    if baseline.get('call') != 105:
+        errors.append(f'baseline call={baseline}')
     rc = 0
     rc2 = 0
+    installed_call = None
+    restored_call = None
     for index in range(cycles):
         rc = script.exports_sync.install()
         if rc != 0:
             errors.append(f'install rc={rc} at {index}')
             break
-        target.command('resume')
-        time.sleep(0.05)
-        target.command('pause')
+        installed_call = target.command('call')
+        if installed_call.get('call') != -73:
+            errors.append(f'installed call={installed_call} at {index}')
+            break
         rc2 = script.exports_sync.uninstall()
         if rc2 != 0:
             errors.append(f'uninstall rc={rc2} at {index}')
             break
-        target.command('resume')
-        time.sleep(0.05)
-        target.command('pause')
-    mid = snapshot(target, script)
+        restored_call = target.command('call')
+        if restored_call.get('call') != 105:
+            errors.append(f'restored call={restored_call} at {index}')
+            break
     target.command('resume')
     time.sleep(0.05)
     end = snapshot(target, script)
-    restored = target.command('call')
-    if mid['hook_blocked'] <= before['hook_blocked']:
-        errors.append('hook never counted a blocked call while installed')
-    if restored.get('call') != 105:
-        errors.append(f'restored call={restored}')
     return {
         'mode': 'quiesced',
         'install_rc': rc,
         'uninstall_rc': rc2,
-        'before': before,
-        'mid': mid,
+        'baseline_call': baseline,
+        'installed_call': installed_call,
+        'restored_call': restored_call,
         'end': end,
-        'restored_call': restored,
         'errors': errors,
     }
 
@@ -233,17 +238,27 @@ def main() -> int:
         else:
             results['quiesced'] = {'mode': 'quiesced', 'skipped': 'target crashed in live mode'}
         if target.alive():
-            results['final'] = snapshot(target, script)
+            try:
+                results['final'] = snapshot(target, script)
+            except Exception as error:
+                results['final'] = {'error': repr(error)}
     finally:
         results['alive_before_close'] = target.alive()
         if session is not None:
+            if target.alive():
+                try:
+                    script.exports_sync.cleanup()
+                except Exception:
+                    pass
             try:
                 session.detach()
             except Exception:
                 pass
         target.close()
-    if args.result:
-        args.result.write_text(json.dumps(results, indent=2))
+        results['target_exit_code'] = target.proc.returncode
+        results['target_stderr_tail'] = getattr(target, 'stderr_text', '')[-4000:]
+        if args.result:
+            args.result.write_text(json.dumps(results, indent=2))
     print(json.dumps(results, indent=2))
     failed = bool(results['live'] and results['live'].get('errors'))
     failed = failed or bool(results['quiesced'] and results['quiesced'].get('errors'))

@@ -95,8 +95,9 @@ LD_PRELOAD=$PWD/libvgpreload.so ./target
 `experiments/mature-hooks/stw.c` 实现了“注入器预快照目标线程 → 信号 handler 停车 → epoch 释放 → PC 在补丁区重试”，接到 funchook 后：
 
 - funchook 无 STW：3×50 轮 live 安装/卸载 **2/3 次目标崩溃**；
-- funchook + STW：3×50 轮 **3/3 全部通过**，目标存活、blocked 持续增长、卸载后恢复 105；
-- 已知未解决：被 hook 函数从**目标主线程**直接调用会挂起（worker 线程正常），以及补丁期间新建线程不会被停；详见实验 README。
+- funchook + STW：3×50 轮曾全部通过；修复主线程调用问题后，反复 5 次 live 压测仍有 2 次在测试收尾阶段目标 SIGSEGV/未退出（换成简单 guard 也复现），问题定位在 inline patch/STW 与 funchook 的交互，而非 VM；当前稳定模式是 quiesced（先暂停目标线程再 patch）；
+- 早期“主线程调用挂起”已修复：给 guard 打点（GVDR）确认主线程调用完整走通；修复为 VM 在 install 阶段初始化（原子 ready）、install/uninstall 的 STW 重试到 PC 不在补丁窗口、epoch/每线程 parked 状态停车协议。验证：主线程连续 200 轮 install→call→uninstall→call 通过，5 次原复现全部通过，500 轮纯 patch 循环通过；
+- 残余风险：live patch 收尾偶发崩溃/不退出、补丁期间新建线程不会被停、trampoline 故意泄漏（避免 free 后 SIGSEGV）。
 
 
 

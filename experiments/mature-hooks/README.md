@@ -54,12 +54,32 @@
 
 实测 STW 开销：一次 install 通常需要 1–5 轮停车（每轮 ~0.1–1ms），主要在等线程进入 handler 与避开 PC 落在补丁区域的线程；运行期无额外开销。
 
-### 已知未解决问题
+### 主线程调用挂起：定位与修复
 
-- **从目标主线程直接调用被 hook 的函数会挂起**（worker 线程调用正常）：即使 guard 用栈上 program / 仅做 `run_ebpf_vm`，通过 funchook 从主线程进入时仍会卡住；而“只初始化 ctx、不调用 VM”或“简单常量 guard”则正常。原因未定位，生产前必须解决（可能与我们 guard 的编译/栈布局或 funchook trampoline 有关）；
+早期版本中，hook 安装后从目标**主线程**调用 `target_fn` 会出现“无响应”，而 worker 线程调用正常。定位过程：
+
+- 在 guard 内打点（进入 `G`、调用 VM 前 `V`、返回后 `D`、命中 BLOCK `R`），并让 target 把 `call` 的进入/退出/打印写入 `/tmp/vg_target_trace`；修复后每次主线程调用都能看到完整 `GVDR` 与 `call-enter/exit/printed`；
+- 通过 Frida RPC 直接调用 guard 函数（不经过 hook）始终正常，说明 guard/VM 本身没问题；
+- 唯一一次可复现的挂起出现在一次 **STW dirty-PC 检查失败、uninstall 返回 -2** 之后；该路径会把 hook 留在已安装状态并继续后续调用；
+- 据此修复了三处时序问题：
+  1. **VM program 在 install 阶段初始化**（而不是 guard 首次调用时懒初始化），`program_ready` 用原子变量；
+  2. install/uninstall 的 STW 都**重试直到所有线程 RIP 不在补丁 16 字节窗口内**（最多 50 次）；
+  3. STW 改为 **epoch 释放协议**：handler 等待“释放 epoch ≥ 进入 epoch”，轮次之间不会把旧 handler 的释放标志重置；每轮开始前等待上一轮 handler 全部退出，超时 500ms。
+
+验证（修复后）：
+
+- 主线程 `pause` 后连续 **200 轮** install → `call`(-73) → uninstall → `call`(105)：全部通过，目标存活；
+- 原挂起复现脚本重复 **5 次**：全部通过；
+- 仅做 patch 循环（worker pause，不调用 hook）**500 轮**：全部通过；
+- live（4 worker 热循环、50 轮 install/uninstall）连续 5 次：**3 次完全通过，2 次在结束阶段目标以 SIGSEGV/-9 退出**（不是主线程调用挂起，发生在测试收尾/detach 前后）。因此主线程调用问题已修复，但“高频 live patch + teardown”仍有残余竞态。
+
+### 残余限制
+
+- **live patch 仍偶发结束阶段崩溃/挂起**（SIGSEGV 或未退出），即使换成简单常量 guard 也会出现 → 问题在 inline patch/STW 与 funchook 的交互，不在 VM/主线程；当前可用的稳定模式是**quiesced（目标线程暂停后再 patch）**；
 - 线程列表由注入器在 attach 前快照，**补丁期间新建的线程不会被停**；需要周期性重新枚举或“先停住创建线程（clone hook）”；
 - PC 落在补丁区域靠重试，极端热的小函数可能多次重试；
-- 信号停车要求目标线程可被信号打断（长时间不可中断睡眠/屏蔽该信号会超时）。
+- 信号停车要求目标线程可被信号打断（长时间不可中断睡眠/屏蔽该信号会超时）；
+- funchook 的 trampoline 在卸载后**故意不释放**（避免线程仍在 trampoline 中时被 free 成 SIGSEGV），会带来每次 patch 的少量内存泄漏；生产需做 trampoline 范围跟踪后再安全释放。
 
 ## 结论
 
