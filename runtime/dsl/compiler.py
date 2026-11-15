@@ -1,4 +1,4 @@
-﻿"""Compile the patch DSL to a Frida agent (and expose metadata for installs).
+"""Compile the patch DSL to a Frida agent (and expose metadata for installs).
 
 The generated agent replaces each mount's target with a NativeCallback that
 evaluates the DSL body.  BLOCK actions are applied in JS; falling off the body
@@ -33,6 +33,7 @@ class CompiledMount:
     args: list[str]
     return_type: str
     nature: str
+    offset: int | None = None
 
 
 @dataclass
@@ -98,7 +99,7 @@ def compile_patch(patch: PatchSpec | str, source: str = '') -> CompiledPatch:
         args = [SCALAR_JS.get(kind, kind) for kind in mount.args]
         ret = SCALAR_JS.get(mount.return_type, mount.return_type)
         compiled_mounts.append(CompiledMount(mount.id, mount.module, mount.symbol,
-                                             args, ret, mount.nature))
+                                             args, ret, mount.nature, mount.offset))
         body = _callback_body(mount, patch.actions)
         mounts_js.append({
             'id': mount.id,
@@ -107,6 +108,7 @@ def compile_patch(patch: PatchSpec | str, source: str = '') -> CompiledPatch:
             'args': args,
             'return_type': ret,
             'nature': mount.nature,
+            'offset': mount.offset,
             'body': body,
         })
     # Build one install pass.  Each callback body is a JavaScript function body.
@@ -116,12 +118,13 @@ def compile_patch(patch: PatchSpec | str, source: str = '') -> CompiledPatch:
         entries.append(f'''
     (function() {{
       const mount = {json.dumps(mount, ensure_ascii=False)};
-      const target = vg_resolve(mount.module, mount.symbol);
+      const target = vg_resolve(mount.module, mount.symbol, mount.offset);
       if (target === null) {{
         throw new Error('mount ' + mount.id + ': unresolved symbol ' + mount.symbol);
       }}
       const original = new SystemFunction(target, mount.return_type, mount.args);
       const callback = new NativeCallback(function({params}) {{
+        VG_HITS[mount.id] = (VG_HITS[mount.id] || 0) + 1;
         const value = VG_VALUE;
 {mount['body']}
       }}, mount.return_type, mount.args);
@@ -135,10 +138,19 @@ def compile_patch(patch: PatchSpec | str, source: str = '') -> CompiledPatch:
 'use strict';
 const VG_INSTALLED = [];
 const VG_TEST = {};
+const VG_HITS = {};
 const VG_VALUE = {};
 const VG_ACTIONS = %s;
 
-function vg_resolve(moduleName, symbol) {
+function vg_resolve(moduleName, symbol, offset) {
+  if (offset !== null && offset !== undefined) {
+    try {
+      let module = null;
+      if (moduleName) module = Process.findModuleByName(moduleName);
+      if (module === null) module = Process.mainModule;
+      if (module !== null) return module.base.add(offset);
+    } catch (error) {}
+  }
   try {
     if (moduleName) {
       const module = Process.findModuleByName(moduleName);
@@ -239,6 +251,7 @@ function vg_install() {
 
 function vg_status() {
   return {
+    hits: VG_HITS,
     installed: VG_INSTALLED.map((entry) => ({
       id: entry.id, symbol: entry.symbol, module: entry.module,
       target: entry.target,
@@ -255,5 +268,6 @@ rpc.exports = {
 ''' % (action_table, ''.join(entries))
     return CompiledPatch(js=js, mounts=compiled_mounts,
                          actions=dict(patch.actions), source=source)
+
 
 

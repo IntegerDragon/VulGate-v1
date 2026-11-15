@@ -51,6 +51,7 @@ class MountSpec:
     return_type: str
     nature: str
     body: str
+    offset: int | None = None
 
 
 @dataclass
@@ -144,11 +145,12 @@ def _split_fields(body: str) -> dict[str, str]:
     return fields
 
 
-def _parse_location(text: str) -> tuple[str | None, str, list[str], str]:
+def _parse_location(text: str) -> tuple[str | None, str, list[str], str, int | None]:
     module = None
     symbol = None
     args: list[str] = []
     return_type = 'int'
+    offset = None
 
     def split_commas(value: str) -> list[str]:
         pieces: list[str] = []
@@ -192,11 +194,13 @@ def _parse_location(text: str) -> tuple[str | None, str, list[str], str]:
                     for item in value.strip('[]').split(',') if item.strip()]
         elif key in ('返回', 'return', 'return_type'):
             return_type = value.strip('"\'')
+        elif key in ('offset', '偏移'):
+            offset = int(value.strip(), 0)
         else:
             raise DSLParseError('unknown location field: ' + key)
     if not symbol:
         raise DSLParseError('location needs symbol')
-    return module, symbol, args, return_type
+    return module, symbol, args, return_type, offset
 
 
 def _parse_action(identifier: str, body: str) -> ActionSpec:
@@ -233,7 +237,7 @@ def parse(text: str) -> PatchSpec:
         location = fields.get('位置')
         if not location:
             raise DSLParseError(f'mount {identifier} has no 位置')
-        module, symbol, args, return_type = _parse_location(location)
+        module, symbol, args, return_type, offset = _parse_location(location)
         nature = fields.get('性质', '拦截点').strip()
         if nature not in ('拦截点', '读取点', 'intercept', 'read'):
             raise DSLParseError(f'mount {identifier} has invalid 性质: {nature}')
@@ -248,7 +252,7 @@ def parse(text: str) -> PatchSpec:
         if not behavior_match:
             raise DSLParseError(f'mount {identifier} has no 行为')
         behavior, _ = _find_block(block, behavior_match.end())
-        mounts.append(MountSpec(identifier, module, symbol, args, return_type, nature, behavior))
+        mounts.append(MountSpec(identifier, module, symbol, args, return_type, nature, behavior, offset))
     if not mounts:
         raise DSLParseError('DSL has no 挂载点')
     return PatchSpec(actions, mounts)
