@@ -64,7 +64,7 @@ ssh qizhi-51 "cd /kyz/VulGate-v1 && \
 
 ```sh
 ssh qizhi-51 "cd /kyz/VulGate-v1 && \
-  .venv/bin/python -m pytest tests/test_dsl.py -q && \
+  .venv/bin/python -m pytest tests/test_dsl.py tests/test_dsl_resolve.py -q && \
   .venv/bin/python -m runtime.dsl.validate20 --json /tmp/dsl20.json"
 ```
 

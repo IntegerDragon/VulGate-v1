@@ -14,6 +14,17 @@ if str(ROOT) not in sys.path:
 
 from runtime.dsl import compiler as dsl_compiler  # noqa: E402
 from runtime.dsl import parser as dsl_parser  # noqa: E402
+from runtime.dsl import resolve as dsl_resolve  # noqa: E402
+
+
+def _module_binaries(values: list[str]) -> dict[str, Path]:
+    result = {}
+    for value in values:
+        if '=' not in value:
+            raise SystemExit('--module-binary expects name=path, got: ' + value)
+        name, path = value.split('=', 1)
+        result[name] = Path(path)
+    return result
 
 
 def main() -> int:
@@ -27,21 +38,41 @@ def main() -> int:
     parser.add_argument('--summary', type=Path)
     parser.add_argument('--test-values', type=Path,
                         help='JSON map of selector test values (validation only)')
+    parser.add_argument('--module-binary', action='append', default=[],
+                        help='name=path override for a module (spawn/check-only)')
     args = parser.parse_args()
 
     patch = dsl_parser.load(args.dsl)
-    compiled = dsl_compiler.compile_patch(patch, args.dsl.read_text(encoding='utf-8'))
-    receipt = {'dsl': str(args.dsl), 'mounts': [mount.__dict__ for mount in compiled.mounts]}
-    if args.check:
-        print(json.dumps(receipt, ensure_ascii=False))
-        return 0
-
+    overrides = _module_binaries(args.module_binary)
     import frida
     device = frida.get_local_device()
     spawned = args.pid is None
-    pid = device.spawn([str(args.spawn.resolve())]) if spawned else args.pid
+    pid = None
     session = None
     try:
+        if args.check:
+            dsl_resolve.resolve_patch(patch, pid=args.pid,
+                                      executable=args.spawn,
+                                      module_binaries=overrides)
+            compiled = dsl_compiler.compile_patch(
+                patch, args.dsl.read_text(encoding='utf-8'))
+            print(json.dumps({'dsl': str(args.dsl),
+                              'mounts': [mount.__dict__ for mount in compiled.mounts]},
+                             ensure_ascii=False))
+            return 0
+
+        if spawned:
+            pid = device.spawn([str(args.spawn.resolve())])
+        else:
+            pid = args.pid
+        # Offset resolution must see the real loaded module paths; for spawn
+        # the target is suspended but /proc/<pid>/maps is already populated.
+        dsl_resolve.resolve_patch(patch, pid=pid, executable=args.spawn,
+                                  module_binaries=overrides)
+        compiled = dsl_compiler.compile_patch(
+            patch, args.dsl.read_text(encoding='utf-8'))
+        receipt = {'dsl': str(args.dsl),
+                   'mounts': [mount.__dict__ for mount in compiled.mounts]}
         session = device.attach(pid)
         script = session.create_script(compiled.js)
         script.load()
@@ -63,7 +94,7 @@ def main() -> int:
                 session.detach()
             except Exception:
                 pass
-        if spawned:
+        if spawned and pid is not None:
             try:
                 device.kill(pid)
             except Exception:

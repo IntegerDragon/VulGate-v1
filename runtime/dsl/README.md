@@ -51,7 +51,9 @@ mount CVE-2026-97205:
      - `new NativeCallback(function(arg0...) { ...; return original(...); }, ...)`；
      - `Interceptor.replace(target, callback)` 安装；
    - 支持 `offset`：`module.base.add(offset)` 解析本地符号；
-3. `run.py`：Frida Python 读取 DSL → 编译 → attach/spawn → 安装；
+3. `run.py`：Frida Python 读取 DSL → 自动补 offset → 编译 → attach/spawn → 安装；
+   `resolve.py`：读 `/proc/<pid>/maps`，用 `nm` 符号表为本地符号自动计算
+   `module.base + offset`；
    `validate20.py`：合成 fixture 验证 BLOCK/PASS/memory 场景。
 
 ## 编译/安装
