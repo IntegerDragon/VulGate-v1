@@ -1,15 +1,17 @@
-"""Sync the local working tree to qizhi-51:/kyz/VulGate-v1 for testing.
+"""Sync the local working tree to a remote test host for quick iteration.
 
-This is for quick iterations before a commit: it copies the working tree
-(excluding .git/build/.venv/cache) via a temporary tarball + scp, then extracts
-it on the server. It does NOT update the server's git HEAD; after testing,
-commit + push locally and run `git pull --ff-only` on the server to normalize.
+Usage:
+    python tools/sync_workspace.py --host <ssh-host> --remote-dir <path>
+
+This copies the working tree (excluding .git/build/.venv/cache) via a temporary
+tarball + scp, then extracts it on the remote host.  It does NOT update the
+remote git HEAD; after testing, commit + push and run `git pull --ff-only`.
 """
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import io
+from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
@@ -20,8 +22,8 @@ EXCLUDED_PARTS = {'.git', 'build', '.venv', '.pytest_cache', '__pycache__', 'nod
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host', default='qizhi-51')
-    parser.add_argument('--remote-dir', default='/kyz/VulGate-v1')
+    parser.add_argument('--host', required=True, help='SSH host alias')
+    parser.add_argument('--remote-dir', required=True, help='absolute remote directory')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
 
@@ -46,8 +48,7 @@ def main() -> int:
             for path, name in files:
                 info = archive.gettarinfo(str(path), arcname=name)
                 data = path.read_bytes()
-                # The local checkout uses CRLF; the server's git checkout uses LF.
-                # Normalize text files so a quick sync does not dirty every file.
+                # Local checkouts may use CRLF; normalize text files to LF.
                 if b'\x00' not in data:
                     data = data.replace(b'\r\n', b'\n')
                 info.size = len(data)
@@ -68,4 +69,3 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
-

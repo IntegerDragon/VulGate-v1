@@ -252,15 +252,14 @@ deploy/                systemd 与权限说明
 
 ## 6. 开发与测试环境
 
-服务器（不再使用 WSL）：
+推荐在 Linux 测试机上运行：
 
-- 主机：`qizhi-51`，代码：`/kyz/VulGate-v1`
-- venv：`.venv`（frida 17.26.2 / pytest / pyelftools）
+- Python venv（frida 17.26.2 / pytest / pyelftools）；
 - 测试：
 
 ```sh
-ssh qizhi-51 "cd /kyz/VulGate-v1 && \
-  .venv/bin/python -m pytest tests/test_dsl.py tests/test_dsl_resolve.py -q"
+python -m pytest tests/test_dsl.py tests/test_dsl_resolve.py -q
 ```
 
-本地修改可通过 `tools/sync_to_qizhi51.py` 快速同步；正式提交后服务器 `git pull --ff-only`。
+本地工作树可通过 `tools/sync_workspace.py --host <test-host> --remote-dir <path>`
+快速同步；正式提交后由测试机 `git pull --ff-only`。

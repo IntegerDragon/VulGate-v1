@@ -1,9 +1,9 @@
-# VulGate Patch DSL
+﻿# VulGate Patch DSL
 
-`runtime/dsl/` 是补丁 DSL 的编译/解释层：把“挂载点 + 行为”的补丁描述编译成
-Frida agent（`NativeCallback` + `SystemFunction`），在目标进程里安装并执行。
+`runtime/dsl/` 鏄ˉ涓?DSL 鐨勭紪璇?瑙ｉ噴灞傦細鎶娾€滄寕杞界偣 + 琛屼负鈥濈殑琛ヤ竵鎻忚堪缂栬瘧鎴?
+Frida agent锛坄NativeCallback` + `SystemFunction`锛夛紝鍦ㄧ洰鏍囪繘绋嬮噷瀹夎骞舵墽琛屻€?
 
-## DSL 语法（英文关键字）
+## DSL 璇硶锛堣嫳鏂囧叧閿瓧锛?
 
 ```text
 action NGX_ERROR_RETURN:
@@ -26,106 +26,107 @@ mount CVE-2026-97205:
 }
 ```
 
-- `mount <id>:`：一个挂载点；
-- `location`：`module`（可选）、`symbol`、`offset`（本地符号）、`args`、`return`；
-- `nature`：`read_point` 或 `intercept`；
-- `behavior`：C 风格语句。`value["x"] = ...` 写入观察值，后续可直接读 `value["x"]`；
-  `return block("ACTION");` 表示 BLOCK；不写 return 则落到 PASS，调用原函数；
-- `action <id>:`：BLOCK 返回动作；`return_type`/`return`/可选 `errno`。
+- `mount <id>:`锛氫竴涓寕杞界偣锛?
+- `location`锛歚module`锛堝彲閫夛級銆乣symbol`銆乣offset`锛堟湰鍦扮鍙凤級銆乣args`銆乣return`锛?
+- `nature`锛歚read_point` 鎴?`intercept`锛?
+- `behavior`锛欳 椋庢牸璇彞銆俙value["x"] = ...` 鍐欏叆瑙傚療鍊硷紝鍚庣画鍙洿鎺ヨ `value["x"]`锛?
+  `return block("ACTION");` 琛ㄧず BLOCK锛涗笉鍐?return 鍒欒惤鍒?PASS锛岃皟鐢ㄥ師鍑芥暟锛?
+- `action <id>:`锛欱LOCK 杩斿洖鍔ㄤ綔锛沗return_type`/`return`/鍙€?`errno`銆?
 
-旧的中文关键字（`动作/挂载点/位置/性质/行为/读取点/拦截点/参数/返回类型/返回`）仍被解析器接受，
-但生成器和仓库内 20 个补丁统一使用英文。
+鏃х殑涓枃鍏抽敭瀛楋紙`鍔ㄤ綔/鎸傝浇鐐?浣嶇疆/鎬ц川/琛屼负/璇诲彇鐐?鎷︽埅鐐?鍙傛暟/杩斿洖绫诲瀷/杩斿洖`锛変粛琚В鏋愬櫒鎺ュ彈锛?
+浣嗙敓鎴愬櫒鍜屼粨搴撳唴 20 涓ˉ涓佺粺涓€浣跨敤鑻辨枃銆?
 
-## 编译实现
+## 缂栬瘧瀹炵幇
 
-1. `parser.py`：扫描 `action`/`mount` 顶层块，按花括号配平提取 `behavior`；
-   解析 `location` 的 `module/symbol/offset/args/return` 和动作字段；
-2. `compiler.py` 把每个 mount 编译成一个 Frida agent 片段：
-   - 每个 `value["x"] = <expr>` 变成 `value["x"] = vg_sel("x", () => (<expr>))`
-     （生产模式执行真实内存读取；验证模式可注入 selector 值）；
-   - `return block("ACTION")` 变成 `return vg_block("ACTION")`；
-   - C 风格临时变量/`for` 声明转成 JS `let`；
-   - 动作表编译为 JS 对象，`vg_block` 按返回类型生成返回值/`errno`；
-   - 每个 mount 生成：
-     - `new SystemFunction(target, return_type, args)` 保存原函数；
-     - `new NativeCallback(function(arg0...) { ...; return original(...); }, ...)`；
-     - `Interceptor.replace(target, callback)` 安装；
-   - 支持 `offset`：`module.base.add(offset)` 解析本地符号；
-3. `run.py`：Frida Python 读取 DSL → 自动补 offset → 编译 → attach/spawn → 安装；
-   `resolve.py`：读 `/proc/<pid>/maps`，用 `nm` 符号表为本地符号自动计算
-   `module.base + offset`；
-   `validate20.py`：合成 fixture 验证 BLOCK/PASS/memory 场景。
+1. `parser.py`锛氭壂鎻?`action`/`mount` 椤跺眰鍧楋紝鎸夎姳鎷彿閰嶅钩鎻愬彇 `behavior`锛?
+   瑙ｆ瀽 `location` 鐨?`module/symbol/offset/args/return` 鍜屽姩浣滃瓧娈碉紱
+2. `compiler.py` 鎶婃瘡涓?mount 缂栬瘧鎴愪竴涓?Frida agent 鐗囨锛?
+   - 姣忎釜 `value["x"] = <expr>` 鍙樻垚 `value["x"] = vg_sel("x", () => (<expr>))`
+     锛堢敓浜фā寮忔墽琛岀湡瀹炲唴瀛樿鍙栵紱楠岃瘉妯″紡鍙敞鍏?selector 鍊硷級锛?
+   - `return block("ACTION")` 鍙樻垚 `return vg_block("ACTION")`锛?
+   - C 椋庢牸涓存椂鍙橀噺/`for` 澹版槑杞垚 JS `let`锛?
+   - 鍔ㄤ綔琛ㄧ紪璇戜负 JS 瀵硅薄锛宍vg_block` 鎸夎繑鍥炵被鍨嬬敓鎴愯繑鍥炲€?`errno`锛?
+   - 姣忎釜 mount 鐢熸垚锛?
+     - `new SystemFunction(target, return_type, args)` 淇濆瓨鍘熷嚱鏁帮紱
+     - `new NativeCallback(function(arg0...) { ...; return original(...); }, ...)`锛?
+     - `Interceptor.replace(target, callback)` 瀹夎锛?
+   - 鏀寔 `offset`锛歚module.base.add(offset)` 瑙ｆ瀽鏈湴绗﹀彿锛?
+3. `run.py`锛欶rida Python 璇诲彇 DSL 鈫?鑷姩琛?offset 鈫?缂栬瘧 鈫?attach/spawn 鈫?瀹夎锛?
+   `resolve.py`锛氳 `/proc/<pid>/maps`锛岀敤 `nm` 绗﹀彿琛ㄤ负鏈湴绗﹀彿鑷姩璁＄畻
+   `module.base + offset`锛?
+   `validate20.py`锛氬悎鎴?fixture 楠岃瘉 BLOCK/PASS/memory 鍦烘櫙銆?
 
-## 编译/安装
+## 缂栬瘧/瀹夎
 
 ```sh
-# 只编译检查
+# 鍙紪璇戞鏌?
 python -m runtime.dsl.run --dsl runtime/dsl/patches/CVE-2026-97205.vg --check
 
-# spawn 目标并安装
+# spawn 鐩爣骞跺畨瑁?
 python -m runtime.dsl.run --dsl runtime/dsl/patches/CVE-2026-97205.vg \
     --spawn ./target --duration 5
 
-# 已有进程
+# 宸叉湁杩涚▼
 python -m runtime.dsl.run --dsl runtime/dsl/patches/CVE-2026-97205.vg \
     --pid 1234 --duration 5
 ```
 
-## 20 个 CVE 的 DSL
+## 20 涓?CVE 鐨?DSL
 
-`runtime/dsl/patches/*.vg` 由 `build/declarative20-specs` 的
-`patch.yaml + app_profile` 生成：
+`runtime/dsl/patches/*.vg` 鐢?`build/declarative20-specs` 鐨?
+`patch.yaml + app_profile` 鐢熸垚锛?
 
 ```sh
 python -m runtime.dsl.generate20 --out runtime/dsl/patches
 ```
 
-生成器需要 `PyYAML`（`requirements-dsl.txt`）。
+鐢熸垚鍣ㄩ渶瑕?`PyYAML`锛坄requirements-dsl.txt`锛夈€?
 
-## 验证
+## 楠岃瘉
 
 ```sh
 python -m runtime.dsl.validate20 --json /tmp/dsl20.json
 ```
 
-验证器为每个 DSL 生成一个小型 fixture 可执行文件（导出目标符号、统计函数体执行次数），
-用 Frida 安装 DSL agent，然后调用目标：
+楠岃瘉鍣ㄤ负姣忎釜 DSL 鐢熸垚涓€涓皬鍨?fixture 鍙墽琛屾枃浠讹紙瀵煎嚭鐩爣绗﹀彿銆佺粺璁″嚱鏁颁綋鎵ц娆℃暟锛夛紝
+鐢?Frida 瀹夎 DSL agent锛岀劧鍚庤皟鐢ㄧ洰鏍囷細
 
-- **BLOCK**：`body_calls == 0`，返回动作值；
-- **PASS**：条件不成立时 `body_calls > 0`，返回原函数结果；
-- **memory 模式**：不注入 selector 值，真实执行内存读取（当前对 `CVE-2026-93479` 跑通）。
+- **BLOCK**锛歚body_calls == 0`锛岃繑鍥炲姩浣滃€硷紱
+- **PASS**锛氭潯浠朵笉鎴愮珛鏃?`body_calls > 0`锛岃繑鍥炲師鍑芥暟缁撴灉锛?
+- **memory 妯″紡**锛氫笉娉ㄥ叆 selector 鍊硷紝鐪熷疄鎵ц鍐呭瓨璇诲彇锛堝綋鍓嶅 `CVE-2026-93479` 璺戦€氾級銆?
 
-服务器 qizhi-51 实测（2026-11-16）：
+鏈嶅姟鍣?test-host 瀹炴祴锛?026-11-16锛夛細
 
 ```
 28/28 DSL scenarios passed (block + pass)
 ```
 
-其中 20 个 CVE 全部 BLOCK 通过；6 个条件式补丁额外验证 PASS；
-`CVE-2026-109618`（全局符号）、`CVE-2026-47360`（指针字段）额外以 memory 模式验证真实内存读取。
-`CVE-2026-93479`/`42945`/`9256` 已改为 return-only 挂载（见
-`docs/ai/DSL_RETURN_ONLY_ANALYSIS.md`）。
+鍏朵腑 20 涓?CVE 鍏ㄩ儴 BLOCK 閫氳繃锛? 涓潯浠跺紡琛ヤ竵棰濆楠岃瘉 PASS锛?
+`CVE-2026-109618`锛堝叏灞€绗﹀彿锛夈€乣CVE-2026-47360`锛堟寚閽堝瓧娈碉級棰濆浠?memory 妯″紡楠岃瘉鐪熷疄鍐呭瓨璇诲彇銆?
+`CVE-2026-93479`/`42945`/`9256` 宸叉敼涓?return-only 鎸傝浇锛堣
+`docs/ai/DSL_RETURN_ONLY_ANALYSIS.md`锛夈€?
 
-## 支持的表达式与动作
+## 鏀寔鐨勮〃杈惧紡涓庡姩浣?
 
-- 表达式：`== != < <= > >=`、`&& || !`、`+ - *`、`& | ^ << >>`、括号、常量；
-- 内存读取：`vg_read_u8/u16/u32/u64`、`vg_read_s8/...`、`vg_read_pointer`；
-- 全局符号：`global("name")`；
-- 行为里可写临时变量（编译为 JS `let`）、`if`、有界 `for`；
-- 动作：`return_int/int64/void/null/string/float/double`；`errno` 可选。
+- 琛ㄨ揪寮忥細`== != < <= > >=`銆乣&& || !`銆乣+ - *`銆乣& | ^ << >>`銆佹嫭鍙枫€佸父閲忥紱
+- 鍐呭瓨璇诲彇锛歚vg_read_u8/u16/u32/u64`銆乣vg_read_s8/...`銆乣vg_read_pointer`锛?
+- 鍏ㄥ眬绗﹀彿锛歚global("name")`锛?
+- 琛屼负閲屽彲鍐欎复鏃跺彉閲忥紙缂栬瘧涓?JS `let`锛夈€乣if`銆佹湁鐣?`for`锛?
+- 鍔ㄤ綔锛歚return_int/int64/void/null/string/float/double`锛沗errno` 鍙€夈€?
 
-## 限制（当前版本）
+## 闄愬埗锛堝綋鍓嶇増鏈級
 
-- 生成的是 **Frida NativeCallback**，与 Frida 后端一样只适用于**单线程/主线程串行调用路径**；
-- 结构体 by-value/sret 返回暂不支持；
-- `vg_map_get`/`vg_map_present` 目前是占位实现（brotli 观察点的真实 callsite 语义未接入）；
-- 动作的 `writes` 尚未在 DSL 编译器中执行；当前验证以返回值/函数体是否执行为准；
-- 2 例以 memory 模式验证（`CVE-2026-109618`/`CVE-2026-47360`）；
-  其余 18 例通过 `vg_sel` 注入 selector 值验证行为分支，编译产物中的内存读取代码未在真实应用上执行；
-- 未接入 `runtime/frida` 的 bundle/smoke/metrics/多进程；这是独立的 DSL → Frida 安装路径。
+- 鐢熸垚鐨勬槸 **Frida NativeCallback**锛屼笌 Frida 鍚庣涓€鏍峰彧閫傜敤浜?*鍗曠嚎绋?涓荤嚎绋嬩覆琛岃皟鐢ㄨ矾寰?*锛?
+- 缁撴瀯浣?by-value/sret 杩斿洖鏆備笉鏀寔锛?
+- `vg_map_get`/`vg_map_present` 鐩墠鏄崰浣嶅疄鐜帮紙brotli 瑙傚療鐐圭殑鐪熷疄 callsite 璇箟鏈帴鍏ワ級锛?
+- 鍔ㄤ綔鐨?`writes` 灏氭湭鍦?DSL 缂栬瘧鍣ㄤ腑鎵ц锛涘綋鍓嶉獙璇佷互杩斿洖鍊?鍑芥暟浣撴槸鍚︽墽琛屼负鍑嗭紱
+- 2 渚嬩互 memory 妯″紡楠岃瘉锛坄CVE-2026-109618`/`CVE-2026-47360`锛夛紱
+  鍏朵綑 18 渚嬮€氳繃 `vg_sel` 娉ㄥ叆 selector 鍊奸獙璇佽涓哄垎鏀紝缂栬瘧浜х墿涓殑鍐呭瓨璇诲彇浠ｇ爜鏈湪鐪熷疄搴旂敤涓婃墽琛岋紱
+- 鏈帴鍏?`runtime/frida` 鐨?bundle/smoke/metrics/澶氳繘绋嬶紱杩欐槸鐙珛鐨?DSL 鈫?Frida 瀹夎璺緞銆?
 
-## 参考
+## 鍙傝€?
 
-- Frida `NativeCallback` / `SystemFunction`（hook 回调与原函数调用）；
-- 原 VulGate 语义：规则返回 PASS/BLOCK，动作目录，`value` 观察槽位；
-- selector 偏移语义沿用 `build/declarative20-specs` 的 app profile layout。
+- Frida `NativeCallback` / `SystemFunction`锛坔ook 鍥炶皟涓庡師鍑芥暟璋冪敤锛夛紱
+- 鍘?VulGate 璇箟锛氳鍒欒繑鍥?PASS/BLOCK锛屽姩浣滅洰褰曪紝`value` 瑙傚療妲戒綅锛?
+- selector 鍋忕Щ璇箟娌跨敤 `build/declarative20-specs` 鐨?app profile layout銆?
+
