@@ -47,10 +47,15 @@ def _identifier(name: str) -> str:
     return name
 
 
-def _guard_supported(guard: dict, action: dict | None) -> bool:
+def _guard_supported(guard: dict, action: dict | None,
+                     backend: str = 'plthook') -> bool:
     if guard.get('shim') is not None or guard.get('varargs'):
         return False
-    if guard.get('offset') is not None or guard.get('vm_args') or guard.get('return_offsets'):
+    if guard.get('vm_args') or guard.get('return_offsets'):
+        return False
+    if backend == 'plthook' and guard.get('offset') is not None:
+        return False
+    if guard.get('offset') is None and guard.get('symbol') is None:
         return False
     if guard.get('observations'):
         return False
@@ -110,7 +115,7 @@ def _action_lines(action: dict, guard: dict) -> list[str]:
     return lines
 
 
-def validate(config: dict, actions: dict) -> list[str]:
+def validate(config: dict, actions: dict, backend: str = 'plthook') -> list[str]:
     errors: list[str] = []
     guards = config.get('guards') or []
     if not guards:
@@ -118,25 +123,35 @@ def validate(config: dict, actions: dict) -> list[str]:
     seen: set[str] = set()
     for guard in guards:
         action = (actions.get('actions') or {}).get(guard.get('action_id'))
-        if not _guard_supported(guard, action):
-            errors.append('guard ' + str(guard.get('id')) + ' is not supported by the plthook backend')
+        if not _guard_supported(guard, action, backend):
+            errors.append('guard ' + str(guard.get('id')) + ' is not supported by the native backend')
+            continue
+        if backend == 'inline' and not guard.get('always_block'):
+            errors.append('inline backend only supports always_block guards '
+                          '(PASS is not safe with the funchook trampoline)')
             continue
         symbol = guard.get('symbol')
-        try:
-            _identifier(str(symbol))
-        except ValueError as error:
-            errors.append(str(error))
-        if symbol in seen:
-            errors.append('duplicate symbol ' + str(symbol))
-        seen.add(symbol)
+        if symbol is not None:
+            try:
+                _identifier(str(symbol))
+            except ValueError as error:
+                errors.append(str(error))
+            if symbol in seen:
+                errors.append('duplicate symbol ' + str(symbol))
+            seen.add(symbol)
         code = guard.get('code')
         if not isinstance(code, list) or not code or len(code) % 8:
             errors.append('guard ' + str(guard.get('id')) + ' has invalid rule bytes')
     return errors
 
 
-def render(config: dict, actions: dict, include_plthook: str = 'plthook.h') -> str:
-    errors = validate(config, actions)
+def render(config: dict, actions: dict, include_plthook: str = 'plthook.h',
+           backend: str = 'plthook') -> str:
+    errors = validate(config, actions, backend)
+    if backend == 'inline':
+        if errors:
+            raise ValueError('; '.join(errors))
+        return _render_inline(config, actions)
     if errors:
         raise ValueError('; '.join(errors))
     guards = config['guards']
@@ -329,21 +344,320 @@ unsigned long long test_passed(int index)
     return header + ''.join(blocks) + footer
 
 
+def _render_inline(config: dict, actions: dict) -> str:
+    import json as _json
+    guards = config['guards']
+    catalog = actions.get('actions') or {}
+    blocks: list[str] = []
+    address_lines: list[str] = []
+    patch_table: list[str] = []
+    programs: list[str] = []
+    for index, guard in enumerate(guards):
+        action = catalog[guard['action_id']]
+        args = guard.get('arg_types') or []
+        params = ', '.join(f'{C_TYPES[kind]} arg{position}'
+                           for position, kind in enumerate(args)) or 'void'
+        names = ', '.join(f'arg{position}' for position in range(len(args)))
+        ret = C_TYPES[guard['return_type']]
+        slots = '\n'.join(line for position, kind in enumerate(args)
+                          for line in _slot_bits(position, kind))
+        rule = ', '.join(str(int(byte) & 0xFF) for byte in guard['code'])
+        step_limit = int(guard.get('step_limit', 4096))
+        action_lines = '\n'.join(_action_lines(action, guard))
+        call = f'real_fn({names})' if names else 'real_fn()'
+        pass_stmt = f'    return {call};' if ret != 'void' else f'    {call};\n    return;'
+        blocks.append(f'''
+typedef {ret} (*real_fn_type_{index})({params});
+static shadow_program program_{index};
+static const unsigned char rule_{index}[] = {{ {rule} }};
+static unsigned long long blocked_{index} = 0;
+static unsigned long long passed_{index} = 0;
+
+__attribute__((constructor)) static void init_{index}(void)
+{{
+    shadow_program_init(rule_{index}, sizeof(rule_{index}), &program_{index});
+}}
+
+__attribute__((visibility("default")))
+{ret} __vg_guard_{index}({params})
+{{
+    uint64_t args[6] = {{0}};
+    uint64_t observations[16] = {{0}};
+    uint64_t stats[3] = {{0}};
+    shadow_ctx ctx;
+    shadow_policy policy;
+    shadow_stats shadow_stats_value;
+{slots}
+    shadow_ctx_init(&ctx);
+    shadow_policy_init(&policy);
+    policy.step_limit = {step_limit};
+    memset(&shadow_stats_value, 0, sizeof(shadow_stats_value));
+    memcpy(ctx.args, args, sizeof(ctx.args));
+    memcpy(ctx.regs, observations, sizeof(ctx.regs));
+    int decision = run_ebpf_vm(&ctx, &program_{index}, &policy, &shadow_stats_value);
+    if (decision != SHADOW_PASS) {{
+        blocked_{index}++;
+{action_lines}
+    }}
+    passed_{index}++;
+    real_fn_type_{index} real_fn = (real_fn_type_{index})real_targets[{index}];
+    if (real_fn == 0) {{
+        return ({ret})0;
+    }}
+{pass_stmt}
+}}
+''')
+        module = str(guard.get('module') or '')
+        if guard.get('offset') is not None:
+            expr = f'__vg_resolve_address({_json.dumps(module)}, (unsigned long){int(guard["offset"])})'
+        else:
+            expr = f'dlsym(RTLD_DEFAULT, {_json.dumps(_identifier(str(guard["symbol"])))})'
+        address_lines.append(f'    target_addresses[{index}] = {expr};')
+        patch_table.append(f'(void *)__vg_guard_{index}')
+        programs.append(f'&program_{index}')
+
+    header = '''/* Generated by runtime/native/build.py (inline funchook backend). */
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <link.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/uio.h>
+#include <unistd.h>
+
+#include "autoshield.h"
+#include "vm.c"
+#include "funchook.h"
+#include "native_stw.c"
+
+int safe_read(void *dst, const void *src, size_t len)
+{
+    struct iovec local = {dst, len};
+    struct iovec remote = {(void *)src, len};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)len ? 0 : -1;
+}
+
+static int __vg_module_matches(const char *module, const char *path)
+{
+    char exe[512] = {0};
+    if (path == 0 || path[0] == 0) {
+        ssize_t length = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (length <= 0) {
+            return 0;
+        }
+        exe[length] = 0;
+        path = exe;
+    }
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    return strcmp(base, module) == 0;
+}
+
+struct __vg_resolve_ctx {
+    const char *module;
+    unsigned long offset;
+    void *result;
+};
+
+static int __vg_resolve_cb(struct dl_phdr_info *info, size_t size, void *data)
+{
+    (void)size;
+    struct __vg_resolve_ctx *ctx = (struct __vg_resolve_ctx *)data;
+    if (!__vg_module_matches(ctx->module, info->dlpi_name)) {
+        return 0;
+    }
+    unsigned long minimum = ~0UL;
+    for (int index = 0; index < info->dlpi_phnum; index++) {
+        const ElfW(Phdr) *phdr = &info->dlpi_phdr[index];
+        if (phdr->p_type == PT_LOAD && phdr->p_vaddr < minimum) {
+            minimum = phdr->p_vaddr;
+        }
+    }
+    if (minimum == ~0UL) {
+        minimum = 0;
+    }
+    ctx->result = (void *)(uintptr_t)(info->dlpi_addr + minimum + ctx->offset);
+    return 1;
+}
+
+static void *__vg_resolve_address(const char *module, unsigned long offset)
+{
+    struct __vg_resolve_ctx ctx = {module, offset, 0};
+    dl_iterate_phdr(__vg_resolve_cb, &ctx);
+    return ctx.result;
+}
+'''
+    count = len(guards)
+    body = '''#define VG_GUARD_COUNT %d
+static void *target_addresses[VG_GUARD_COUNT];
+static void *real_targets[VG_GUARD_COUNT];
+static funchook_t *hooks[VG_GUARD_COUNT];
+static int native_installed = 0;
+static int native_last_error = 0;
+''' % count
+    footer = '''__attribute__((visibility("default")))
+int test_probe(void)
+{
+    shadow_program *programs[VG_GUARD_COUNT] = { %(programs)s };
+    for (int i = 0; i < VG_GUARD_COUNT; i++) {
+        if (shadow_program_validate(programs[i]) != 0) {
+            native_last_error = 12;
+            return native_last_error;
+        }
+    }
+%(addresses)s
+    for (int i = 0; i < VG_GUARD_COUNT; i++) {
+        if (target_addresses[i] == 0) {
+            native_last_error = 11;
+            return native_last_error;
+        }
+    }
+    native_last_error = 0;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int test_set_threads(const char *csv)
+{
+    pid_t tids[STW_MAX_THREADS];
+    int count = 0;
+    const char *cursor = csv;
+    while (cursor && *cursor && count < STW_MAX_THREADS) {
+        char *end = NULL;
+        long value = strtol(cursor, &end, 10);
+        if (end == cursor) {
+            break;
+        }
+        tids[count++] = (pid_t)value;
+        cursor = end;
+        while (*cursor == ',' || *cursor == ' ') cursor++;
+    }
+    stw_set_known_threads(tids, count);
+    return count;
+}
+
+__attribute__((visibility("default")))
+int test_install(void)
+{
+    if (native_installed) {
+        return 0;
+    }
+    if (test_probe() != 0) {
+        return native_last_error;
+    }
+    void *replacement[] = { %(patch_table)s };
+    for (int i = 0; i < VG_GUARD_COUNT; i++) {
+        real_targets[i] = target_addresses[i];
+        hooks[i] = funchook_create();
+        if (hooks[i] == 0) {
+            native_last_error = 20;
+            return native_last_error;
+        }
+        if (funchook_prepare(hooks[i], &real_targets[i], replacement[i]) != 0) {
+            native_last_error = 20;
+            return native_last_error;
+        }
+        if (stw_begin_clean((uintptr_t)target_addresses[i], 16, 0, 0, 50) != 0) {
+            native_last_error = 22;
+            return native_last_error;
+        }
+        int rc = funchook_install(hooks[i], 0);
+        stw_end();
+        if (rc != 0) {
+            native_last_error = 20;
+            return native_last_error;
+        }
+    }
+    native_installed = 1;
+    native_last_error = 0;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int test_uninstall(void)
+{
+    if (!native_installed) {
+        return 0;
+    }
+    for (int i = 0; i < VG_GUARD_COUNT; i++) {
+        if (stw_begin_clean((uintptr_t)target_addresses[i], 16, 0, 0, 50) == 0) {
+            funchook_uninstall(hooks[i], 0);
+            stw_end();
+        } else {
+            funchook_uninstall(hooks[i], 0);
+        }
+    }
+    native_installed = 0;
+    native_last_error = 0;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int test_installed(void) { return native_installed; }
+
+__attribute__((visibility("default")))
+int test_guard_count(void) { return VG_GUARD_COUNT; }
+
+__attribute__((visibility("default")))
+int test_last_error(void) { return native_last_error; }
+
+__attribute__((visibility("default")))
+int test_cleanup(void) { stw_cleanup(); return 0; }
+
+__attribute__((visibility("default")))
+unsigned long long test_blocked(int index)
+{
+    unsigned long long values[] = { %(blocked)s };
+    return (index >= 0 && index < VG_GUARD_COUNT) ? values[index] : 0;
+}
+
+__attribute__((visibility("default")))
+unsigned long long test_passed(int index)
+{
+    unsigned long long values[] = { %(passed)s };
+    return (index >= 0 && index < VG_GUARD_COUNT) ? values[index] : 0;
+}
+''' % {
+        'programs': ', '.join(programs),
+        'addresses': '\n'.join(address_lines),
+        'patch_table': ', '.join(patch_table),
+        'blocked': ', '.join(f'blocked_{index}' for index in range(count)),
+        'passed': ', '.join(f'passed_{index}' for index in range(count)),
+    }
+    return header + body + ''.join(blocks) + footer
+
+
 def build(config: dict, actions: dict, output: Path, plthook_dir: Path | None = None,
-          cc: str | None = None) -> Path:
-    plthook_dir = Path(plthook_dir) if plthook_dir is not None else Path(
-        '/tmp/mature-hooks/plthook')
-    plthook_header = plthook_dir / 'plthook.h'
-    plthook_source = plthook_dir / 'plthook_elf.c'
-    if not plthook_header.is_file() or not plthook_source.is_file():
-        raise ValueError('plthook headers/source not found: ' + str(plthook_dir))
+          cc: str | None = None, backend: str = 'plthook',
+          funchook_dir: Path | None = None) -> Path:
     compiler = cc or shutil.which('cc') or shutil.which('gcc')
     if not compiler:
         raise RuntimeError('C compiler missing')
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     source = output.with_suffix('.c')
-    source.write_text(render(config, actions), encoding='utf-8')
+    source.write_text(render(config, actions, backend=backend), encoding='utf-8')
+    if backend == 'inline':
+        funchook_dir = Path(funchook_dir) if funchook_dir is not None else Path(
+            '/tmp/mature-hooks/funchook')
+        if not (funchook_dir / 'include' / 'funchook.h').is_file():
+            raise ValueError('funchook headers not found: ' + str(funchook_dir))
+        subprocess.run([compiler, '-std=c11', '-O2', '-g', '-shared', '-fPIC',
+                        '-I', str(ROOT / 'runtime'), '-I', str(ROOT / 'runtime' / 'native'),
+                        '-I', str(funchook_dir / 'include'),
+                        str(source), '-L', str(funchook_dir / 'build'), '-lfunchook',
+                        '-Wl,-rpath,' + str(funchook_dir / 'build'),
+                        '-o', str(output), '-ldl'], check=True)
+        return output
+    plthook_dir = Path(plthook_dir) if plthook_dir is not None else Path(
+        '/tmp/mature-hooks/plthook')
+    plthook_header = plthook_dir / 'plthook.h'
+    plthook_source = plthook_dir / 'plthook_elf.c'
+    if not plthook_header.is_file() or not plthook_source.is_file():
+        raise ValueError('plthook headers/source not found: ' + str(plthook_dir))
     subprocess.run([compiler, '-std=c11', '-O2', '-g', '-shared', '-fPIC',
                     '-I', str(ROOT / 'runtime'), '-I', str(plthook_dir),
                     str(source), str(plthook_source), '-o', str(output), '-ldl'], check=True)
@@ -356,10 +670,11 @@ def main() -> None:
     parser.add_argument('--catalog', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--plthook-dir', type=Path)
+    parser.add_argument('--backend', choices=['plthook', 'inline'], default='plthook')
     args = parser.parse_args()
     from runtime.frida.run import load_bundle
     config, actions = load_bundle(args.manifest, args.catalog)
-    print(build(config, actions, args.output, args.plthook_dir))
+    print(build(config, actions, args.output, args.plthook_dir, backend=args.backend))
 
 
 if __name__ == '__main__':

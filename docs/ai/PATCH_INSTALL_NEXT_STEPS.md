@@ -194,6 +194,19 @@ Frida attach 路径限制（详见 `docs/ai/FRIDA_THREAD_SAFETY.md`）：
 - **权限指南/systemd/容器**：`PLATFORM_AND_LIMITS.md` + `deploy/README.md` + `deploy/vulgate-frida.service`（仅 `CAP_SYS_PTRACE`、`NoNewPrivileges`、控制 socket 与事件日志）。
 - 限制：签名为共享密钥 HMAC（非对称签名未做）；未在真实 nginx/httpd/PHP 二进制上执行 WP9/WP10 流程（v1 无 benchmark 构建）。
 
+## 3.1 原生后端（bundle 驱动，Frida Python 注入）
+
+`runtime/native/` 提供两个从现有 bundle/action catalog 生成的原生后端：
+
+- **plthook**（默认）：GOT/PLT 替换，支持 BLOCK + PASS（`dlsym` 调原函数）；单次 live PASS **20/20**、
+  BLOCK/PASS 各 5 进程回归通过；只覆盖 PLT 调用。
+- **inline**（funchook + 信号 STW）：支持 symbol/offset 挂点，BLOCK-only（要求 `always_block: true`）；
+  BLOCK 单次 live + 5 进程回归通过；同一 bundle 语义（manifest/actions/rule/step_limit/return/writes/errno）。
+- `runtime/native/build.py` 生成 agent；`runtime/native/run.py` 用 Frida Python 注入并输出
+  `probe_code/install_code/uninstall_code/status` 回执；错误码 10–22。
+- 限制：inline PASS 不稳定（funchook trampoline），PASS 场景走 plthook；observers/maps、smoke、metrics 未接入；
+  未验证 ARM64/Windows。
+
 ## 4. 里程碑
 
 | 里程碑 | 内容 | 验收 |

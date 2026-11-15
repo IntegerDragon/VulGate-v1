@@ -82,7 +82,11 @@ class ControlServer(threading.Thread):
         self.path = Path(path)
         self.handler = handler
         self._stop = threading.Event()
+        self._ready = threading.Event()
         self._server = None
+
+    def wait_ready(self, timeout: float = 3.0) -> bool:
+        return self._ready.wait(timeout)
 
     def run(self) -> None:
         try:
@@ -90,10 +94,14 @@ class ControlServer(threading.Thread):
         except FileNotFoundError:
             pass
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._server.bind(str(self.path))
-        self._server.listen(8)
-        self._server.settimeout(0.2)
+        try:
+            self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._server.bind(str(self.path))
+            self._server.listen(8)
+            self._server.settimeout(0.2)
+        except OSError:
+            return
+        self._ready.set()
         while not self._stop.is_set():
             try:
                 client, _ = self._server.accept()

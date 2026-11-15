@@ -1,7 +1,7 @@
-"""Frida-Python launcher for the native plthook backend.
+"""Frida-Python launcher for the native backends (plthook / inline funchook).
 
 Loads a VulGate bundle, generates/compiles a native agent, injects it with
-Frida, and exposes probe/install/uninstall/status. No target rebuild is needed.
+Frida, and exposes probe/install/uninstall/status.
 """
 from __future__ import annotations
 
@@ -12,10 +12,17 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
-def _agent_script(library: Path) -> str:
-    return r'''
+def _agent_script(library: Path, inline: bool = False) -> str:
+    extra = ''
+    if inline:
+        extra = """
+    setThreads: (csv) => fn('test_set_threads', 'int', ['pointer'])(Memory.allocUtf8String(csv)),
+    cleanup: () => fn('test_cleanup', 'int', [])(),"""
+    template = r'''
 const lib = Module.load(%s);
 function fn(name, ret, args) { return new NativeFunction(lib.getExportByName(name), ret, args); }
 rpc.exports = {
@@ -26,7 +33,7 @@ rpc.exports = {
     guards: () => fn('test_guard_count', 'int', [])(),
     lastError: () => fn('test_last_error', 'int', [])(),
     blocked: (index) => fn('test_blocked', 'uint64', ['int'])(index).toNumber(),
-    passed: (index) => fn('test_passed', 'uint64', ['int'])(index).toNumber(),
+    passed: (index) => fn('test_passed', 'uint64', ['int'])(index).toNumber(),%s
     status: () => {
         const count = fn('test_guard_count', 'int', [])();
         const guards = [];
@@ -44,7 +51,16 @@ rpc.exports = {
         };
     },
 };
-''' % json.dumps(str(library))
+''' % (json.dumps(str(library)), extra)
+    return template
+
+
+def _thread_csv(pid: int) -> str | None:
+    try:
+        tids = sorted(int(entry.name) for entry in Path(f'/proc/{pid}/task').iterdir())
+        return ','.join(str(tid) for tid in tids)
+    except OSError:
+        return None
 
 
 def main() -> int:
@@ -59,6 +75,8 @@ def main() -> int:
     parser.add_argument('--check-only', action='store_true')
     parser.add_argument('--build-dir', type=Path, default=Path('build/native'))
     parser.add_argument('--plthook-dir', type=Path)
+    parser.add_argument('--funchook-dir', type=Path)
+    parser.add_argument('--backend', choices=['plthook', 'inline'], default='plthook')
     parser.add_argument('--summary', type=Path)
     args = parser.parse_args()
 
@@ -68,17 +86,18 @@ def main() -> int:
 
     try:
         config, actions = load_bundle(args.manifest, args.catalog)
-        errors = native_build.validate(config, actions)
+        errors = native_build.validate(config, actions, args.backend)
         if errors:
             raise ValueError('; '.join(errors))
+        library = native_build.build(config, actions,
+                                     Path(args.build_dir) / 'vulgate_native_agent.so',
+                                     args.plthook_dir, backend=args.backend,
+                                     funchook_dir=args.funchook_dir)
     except (ValueError, OSError) as error:
         print(json.dumps({'installed': False, 'error': str(error),
                           'code': 'E_BUNDLE_UNSUPPORTED'}), flush=True)
         return 3
 
-    library = native_build.build(config, actions,
-                                 Path(args.build_dir) / 'vulgate_native_agent.so',
-                                 args.plthook_dir)
     device = frida.get_local_device()
     pid = args.pid
     spawned = pid is None
@@ -86,12 +105,19 @@ def main() -> int:
         pid = device.spawn([str(args.spawn.resolve()), *args.arg])
     session = None
     script = None
-    receipt = {'backend': 'plthook', 'bundle_digest': config.get('bundle_digest'),
+    receipt = {'backend': args.backend, 'bundle_digest': config.get('bundle_digest'),
                'guards': len(config['guards']), 'installed': False}
     try:
         session = device.attach(pid)
-        script = session.create_script(_agent_script(Path(library).resolve()))
+        script = session.create_script(_agent_script(Path(library).resolve(),
+                                                     args.backend == 'inline'))
         script.load()
+        # For attach mode STW needs the target thread list; for spawn the target
+        # is still suspended, so no threads are running during patching.
+        if args.backend == 'inline' and not spawned:
+            csv = _thread_csv(pid)
+            if csv:
+                script.exports_sync.set_threads(csv)
         probe_code = script.exports_sync.probe()
         receipt['probe_code'] = probe_code
         receipt['probe'] = 'ok' if probe_code == 0 else 'failed'
@@ -102,6 +128,7 @@ def main() -> int:
         receipt['install_code'] = install_code
         if install_code != 0:
             receipt['error'] = 'install failed: ' + str(install_code)
+            receipt['last_error'] = script.exports_sync.lastError()
             print(json.dumps(receipt, ensure_ascii=False), flush=True)
             return 4
         receipt['installed'] = True
@@ -119,6 +146,11 @@ def main() -> int:
         print(json.dumps(receipt, ensure_ascii=False), flush=True)
         return 0 if uninstall_code == 0 else 4
     finally:
+        if script is not None and args.backend == 'inline':
+            try:
+                script.exports_sync.cleanup()
+            except Exception:
+                pass
         if script is not None:
             try:
                 script.unload()

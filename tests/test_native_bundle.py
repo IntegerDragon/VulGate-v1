@@ -207,3 +207,210 @@ def test_native_plthook_pass_multi_process(tmp_path: Path) -> None:
         assert result['status_after']['installed'] is False, (run, result)
         assert result['status']['guards'][0]['passed'] > 0, (run, result)
         assert result['exit_code'] == 0, (run, result)
+
+def test_validate_inline_requires_always_block() -> None:
+    guard = {
+        'id': 'g', 'symbol': 'target_fn', 'arg_types': ['int'], 'return_type': 'int',
+        'code': list(BLOCK_RULE), 'action_id': 'a', 'step_limit': 4096,
+    }
+    manifest = {'guards': [guard]}
+    catalog = {'actions': {'a': {'kind': 'return_int', 'value': -73}}}
+    errors = native_build.validate(manifest, catalog, 'inline')
+    assert errors and 'always_block' in errors[0]
+    guard['always_block'] = True
+    assert native_build.validate(manifest, catalog, 'inline') == []
+
+
+def _inline_manifest(tmp_path: Path) -> tuple[Path, Path]:
+    rule_path = tmp_path / 'rule.bin'
+    rule_path.write_bytes(BLOCK_RULE)
+    manifest = {
+        'schema': 1, 'bridge': str(FRIDA_BRIDGE), 'maps': {}, 'observers': [],
+        'guards': [{
+            'id': 'inline_block', 'module': 'target', 'symbol': 'target_fn',
+            'arg_types': ['int'], 'return_type': 'int', 'rule': str(rule_path),
+            'action_id': 'block', 'step_limit': 4096, 'always_block': True,
+        }],
+    }
+    catalog = {'schema': 1, 'actions': {'block': {'kind': 'return_int', 'value': -73}}}
+    manifest_path = tmp_path / 'manifest.json'
+    catalog_path = tmp_path / 'actions.json'
+    manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+    catalog_path.write_text(json.dumps(catalog), encoding='utf-8')
+    return manifest_path, catalog_path
+
+
+def _build_self_target(tmp_path: Path) -> Path:
+    target = tmp_path / 'target'
+    subprocess.run(['gcc', '-O2', '-g', '-rdynamic', '-pthread',
+                    str(EXPERIMENTS / 'target.c'), '-o', str(target)], check=True)
+    return target
+
+
+FUNCHOOK_DIR = Path('/tmp/mature-hooks/funchook')
+
+
+@_skip
+def test_native_inline_block_single_live(tmp_path: Path) -> None:
+    import frida
+    from runtime.frida.run import load_bundle
+    from runtime.native.run import _agent_script
+
+    target_path = _build_self_target(tmp_path)
+    manifest_path, catalog_path = _inline_manifest(tmp_path)
+    config, actions = load_bundle(manifest_path, catalog_path)
+    library = native_build.build(config, actions, tmp_path / 'agent.so',
+                                 backend='inline', funchook_dir=FUNCHOOK_DIR)
+    proc = subprocess.Popen([str(target_path)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, bufsize=1)
+    try:
+        assert json.loads(proc.stdout.readline())['ready'] is True
+        tids = sorted(int(entry.name) for entry in Path(f'/proc/{proc.pid}/task').iterdir())
+        session = frida.get_local_device().attach(proc.pid)
+        try:
+            script = session.create_script(_agent_script(library, inline=True))
+            script.load()
+            script.exports_sync.set_threads(','.join(map(str, tids)))
+            assert script.exports_sync.probe() == 0
+            assert script.exports_sync.install() == 0
+            proc.stdin.write('call\n')
+            proc.stdin.flush()
+            assert json.loads(proc.stdout.readline())['call'] == -73
+            status = script.exports_sync.status()
+            assert script.exports_sync.uninstall() == 0
+            proc.stdin.write('call\n')
+            proc.stdin.flush()
+            assert json.loads(proc.stdout.readline())['call'] == 105
+            script.exports_sync.cleanup()
+            proc.stdin.write('exit\n')
+            proc.stdin.flush()
+            proc.wait(timeout=5)
+            assert proc.returncode == 0
+            assert status['guards'][0]['blocked'] > 0
+        finally:
+            try:
+                session.detach()
+            except Exception:
+                pass
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+@_skip
+def test_native_inline_block_multi_process(tmp_path: Path) -> None:
+    for run in range(5):
+        run_dir = tmp_path / f'inline-{run}'
+        run_dir.mkdir()
+        test_native_inline_block_single_live(run_dir)
+
+
+
+@_skip
+def test_native_launcher_inline_injector(tmp_path: Path) -> None:
+    source = tmp_path / 'loop_target.c'
+    source.write_text(r"""
+#include <unistd.h>
+__attribute__((visibility("default"), noinline))
+int target_fn(int value) { return 100 + value; }
+int main(void) { for (;;) { sleep(1); } }
+""", encoding='utf-8')
+    target_path = tmp_path / 'loop_target'
+    subprocess.run(['gcc', '-O2', '-g', '-rdynamic', str(source), '-o', str(target_path)],
+                   check=True)
+    manifest_path, catalog_path = _inline_manifest(tmp_path)
+    result = subprocess.run([
+        sys.executable, str(ROOT / 'runtime' / 'native' / 'run.py'),
+        '--spawn', str(target_path),
+        '--manifest', str(manifest_path), '--catalog', str(catalog_path),
+        '--backend', 'inline', '--funchook-dir', str(FUNCHOOK_DIR),
+        '--build-dir', str(tmp_path / 'launcher-build'),
+        '--duration', '0.2',
+    ], capture_output=True, text=True, timeout=60,
+        env={**os.environ,
+             'PYTHONPATH': str(ROOT) + os.pathsep + os.environ.get('PYTHONPATH', '')})
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipts = [json.loads(line) for line in result.stdout.splitlines()
+                if line.startswith('{')]
+    assert receipts and receipts[-1]['install_code'] == 0, receipts
+    assert receipts[-1]['uninstall_code'] == 0, receipts
+    assert receipts[-1]['status']['installed'] is False, receipts
+
+
+def test_validate_inline_accepts_offset() -> None:
+    guard = {
+        'id': 'g', 'module': 'target', 'offset': 0x1520,
+        'arg_types': ['int'], 'return_type': 'int', 'code': list(BLOCK_RULE),
+        'action_id': 'a', 'step_limit': 4096, 'always_block': True,
+    }
+    manifest = {'guards': [guard]}
+    catalog = {'actions': {'a': {'kind': 'return_int', 'value': -73}}}
+    assert native_build.validate(manifest, catalog, 'inline') == []
+    # plthook cannot express offset mounts
+    assert native_build.validate(manifest, catalog, 'plthook')
+
+
+@_skip
+def test_native_inline_offset_single_live(tmp_path: Path) -> None:
+    import frida
+    from runtime.frida.run import load_bundle
+    from runtime.frida import symbols
+    from runtime.native.run import _agent_script
+
+    target_path = _build_self_target(tmp_path)
+    table = symbols.build_table(target_path, ['target_fn'])
+    offset = table['symbols']['target_fn']
+    rule_path = tmp_path / 'offset-rule.bin'
+    rule_path.write_bytes(BLOCK_RULE)
+    manifest = {
+        'schema': 1, 'bridge': str(FRIDA_BRIDGE), 'maps': {}, 'observers': [],
+        'guards': [{
+            'id': 'inline_offset', 'module': 'target', 'offset': offset,
+            'arg_types': ['int'], 'return_type': 'int', 'rule': str(rule_path),
+            'action_id': 'block', 'step_limit': 4096, 'always_block': True,
+        }],
+    }
+    catalog = {'schema': 1, 'actions': {'block': {'kind': 'return_int', 'value': -73}}}
+    manifest_path = tmp_path / 'offset-manifest.json'
+    catalog_path = tmp_path / 'offset-actions.json'
+    manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+    catalog_path.write_text(json.dumps(catalog), encoding='utf-8')
+    config, actions = load_bundle(manifest_path, catalog_path)
+    library = native_build.build(config, actions, tmp_path / 'offset-agent.so',
+                                 backend='inline', funchook_dir=FUNCHOOK_DIR)
+    proc = subprocess.Popen([str(target_path)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, bufsize=1)
+    try:
+        assert json.loads(proc.stdout.readline())['ready'] is True
+        tids = sorted(int(entry.name) for entry in Path(f'/proc/{proc.pid}/task').iterdir())
+        session = frida.get_local_device().attach(proc.pid)
+        try:
+            script = session.create_script(_agent_script(library, inline=True))
+            script.load()
+            script.exports_sync.set_threads(','.join(map(str, tids)))
+            assert script.exports_sync.probe() == 0
+            assert script.exports_sync.install() == 0
+            proc.stdin.write('call\n')
+            proc.stdin.flush()
+            assert json.loads(proc.stdout.readline())['call'] == -73
+            assert script.exports_sync.uninstall() == 0
+            proc.stdin.write('call\n')
+            proc.stdin.flush()
+            assert json.loads(proc.stdout.readline())['call'] == 105
+            script.exports_sync.cleanup()
+            proc.stdin.write('exit\n')
+            proc.stdin.flush()
+            proc.wait(timeout=5)
+            assert proc.returncode == 0
+        finally:
+            try:
+                session.detach()
+            except Exception:
+                pass
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

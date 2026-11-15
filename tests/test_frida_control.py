@@ -18,9 +18,7 @@ def test_server_answers_client_requests(tmp_path: Path) -> None:
     server = control.ControlServer(path, lambda request: {'echo': request['command']})
     server.start()
     try:
-        deadline = __import__('time').monotonic() + 3
-        while not path.exists() and __import__('time').monotonic() < deadline:
-            __import__('time').sleep(0.01)
+        assert server.wait_ready(3.0)
         client = control.ControlClient(path, timeout=5)
         assert client.request({'command': 'status'}) == {'echo': 'status'}
         assert client.request({'command': 'metrics'}) == {'echo': 'metrics'}
