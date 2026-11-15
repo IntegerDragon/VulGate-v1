@@ -1,119 +1,79 @@
-# 成熟 Hook 库可行性测试（热挂载 + 多线程运行中安装/卸载）
+﻿# 鎴愮啛 Hook 搴撳彲琛屾€ф祴璇曪紙鐑寕杞?+ 澶氱嚎绋嬭繍琛屼腑瀹夎/鍗歌浇锛?
+鐩爣锛氬洖绛斾袱涓棶棰樷€斺€?*鎴愮啛搴撹兘鍚︾敤浜庣儹琛ヤ竵**锛屼互鍙?*绾跨▼鎸佺画杩愯鏃跺畨瑁?鍗歌浇鏄惁瀹夊叏**銆?
+## 娴嬭瘯鐜
 
-目标：回答两个问题——**成熟库能否用于热补丁**，以及**线程持续运行时安装/卸载是否安全**。
+- WSL Ubuntu 24.04銆亁86-64銆乬cc 13銆丗rida 17.26.2锛堜粎浣滀负鈥滆繍琛屾椂娉ㄥ叆鍣ㄢ€濓紝鎶婃祴璇?agent `.so` 鍔犺浇杩涚洰鏍囧苟璋冪敤鍏跺鍑哄嚱鏁帮級锛?- 鐩爣杩涚▼锛? 涓?pthread 鎸佺画璋冪敤 `target_fn(int)`锛堟棤 sleep锛岀儹寰幆锛夛紝涓荤嚎绋嬬敤 stdin 鍛戒护
+  `status / call / pause / resume / exit` 鏌ヨ锛?- 娴嬭瘯 agent锛氬簱 + `runtime/vm.c`锛堥潤鎬佸祵鍏ワ級锛実uard 鍛戒腑 BLOCK 杩斿洖 -73锛孭ASS 璋冨師鍑芥暟锛?- 姣忚疆瀹夎鍚庣瓑寰?10ms 鍐嶅嵏杞斤紝閲嶅 50 杞紝缁熻鐩爣鏄惁瀛樻椿銆乥locked 璁℃暟銆佸嵏杞藉悗璋冪敤鏄惁鎭㈠ 105銆?
+## 搴撲笌缁撴灉
 
-## 测试环境
-
-- WSL Ubuntu 24.04、x86-64、gcc 13、Frida 17.26.2（仅作为“运行时注入器”，把测试 agent `.so` 加载进目标并调用其导出函数）；
-- 目标进程：4 个 pthread 持续调用 `target_fn(int)`（无 sleep，热循环），主线程用 stdin 命令
-  `status / call / pause / resume / exit` 查询；
-- 测试 agent：库 + `runtime/vm.c`（静态嵌入），guard 命中 BLOCK 返回 -73，PASS 调原函数；
-- 每轮安装后等待 10ms 再卸载，重复 50 轮，统计目标是否存活、blocked 计数、卸载后调用是否恢复 105。
-
-## 库与结果
-
-| 库 | 机制 | 版本 | 热挂载 | 运行中安装/卸载 | 结论 |
+| 搴?| 鏈哄埗 | 鐗堟湰 | 鐑寕杞?| 杩愯涓畨瑁?鍗歌浇 | 缁撹 |
 |---|---|---|---|---|---|
-| **funchook** | inline hook（写函数入口跳转） | `b499170` | ✅ Frida 注入 agent 后调用 | ❌ 无 STW 时 3 次 50 轮实验：1 次通过，**2 次目标进程崩溃**（BrokenPipe）；加自实现 STW 后 **3×50 轮全部通过** | 引擎可用，但 install/uninstall **必须配 stop-the-world** |
-| **plthook** | GOT/PLT 表项改写 | `24c69df`（已归档） | ✅ | ✅ 3 次 × 50 轮全部通过，目标存活，blocked 计数持续增长 | 可安全热安装/卸载，但只覆盖 PLT 调用 |
-| Dobby | inline hook | 仓库 HEAD | 编译失败 | 未测 | GCC 下编译问题（`__has_feature`、头文件/结构不一致），本机未跑通 |
-| subhook | inline hook | — | clone 失败 | 未测 | GitHub clone/归档下载多次超时（网络限制） |
-| Frida Gum devkit | Gum C API | 17.26.2 | 下载失败 | 未测 | release 资产下载被网络阻断；Frida JS 路径的已知限制见 `FRIDA_THREAD_SAFETY.md` |
+| **funchook** | inline hook锛堝啓鍑芥暟鍏ュ彛璺宠浆锛?| `b499170` | 鉁?Frida 娉ㄥ叆 agent 鍚庤皟鐢?| 鉂?鏃?STW 鏃?3 娆?50 杞疄楠岋細1 娆￠€氳繃锛?*2 娆＄洰鏍囪繘绋嬪穿婧?*锛圔rokenPipe锛夛紱鍔犺嚜瀹炵幇 STW 鍚?**3脳50 杞叏閮ㄩ€氳繃** | 寮曟搸鍙敤锛屼絾 install/uninstall **蹇呴』閰?stop-the-world** |
+| **plthook** | GOT/PLT 琛ㄩ」鏀瑰啓 | `24c69df`锛堝凡褰掓。锛?| 鉁?| 鉁?3 娆?脳 50 杞叏閮ㄩ€氳繃锛岀洰鏍囧瓨娲伙紝blocked 璁℃暟鎸佺画澧為暱 | 鍙畨鍏ㄧ儹瀹夎/鍗歌浇锛屼絾鍙鐩?PLT 璋冪敤 |
+| Dobby | inline hook | 浠撳簱 HEAD | 缂栬瘧澶辫触 | 鏈祴 | GCC 涓嬬紪璇戦棶棰橈紙`__has_feature`銆佸ご鏂囦欢/缁撴瀯涓嶄竴鑷达級锛屾湰鏈烘湭璺戦€?|
+| subhook | inline hook | 鈥?| clone 澶辫触 | 鏈祴 | GitHub clone/褰掓。涓嬭浇澶氭瓒呮椂锛堢綉缁滈檺鍒讹級 |
+| Frida Gum devkit | Gum C API | 17.26.2 | 涓嬭浇澶辫触 | 鏈祴 | release 璧勪骇涓嬭浇琚綉缁滈樆鏂紱Frida JS 璺緞鐨勫凡鐭ラ檺鍒惰 `FRIDA_THREAD_SAFETY.md` |
 
-### funchook 细节
+### funchook 缁嗚妭
 
-- inline hook 本身工作正常：安装后 worker 线程大量返回 -73，`hook_blocked` 达 300 万+；卸载后 `call` 恢复 105；
-- 但 4 线程持续调用时，安装/卸载窗口内会出现目标进程直接崩溃（3 次里 2 次）；
-- 目标应用层 `pause`（worker 自旋等待）后，连续 30 次安装/卸载全部正确，无崩溃；
-- funchook 的 `funchook_install/uninstall` 没有“停止其他线程”的选项（flags 保留为 0），符合其非线程安全的预期。
+- inline hook 鏈韩宸ヤ綔姝ｅ父锛氬畨瑁呭悗 worker 绾跨▼澶ч噺杩斿洖 -73锛宍hook_blocked` 杈?300 涓?锛涘嵏杞藉悗 `call` 鎭㈠ 105锛?- 浣?4 绾跨▼鎸佺画璋冪敤鏃讹紝瀹夎/鍗歌浇绐楀彛鍐呬細鍑虹幇鐩爣杩涚▼鐩存帴宕╂簝锛? 娆￠噷 2 娆★級锛?- 鐩爣搴旂敤灞?`pause`锛坵orker 鑷棆绛夊緟锛夊悗锛岃繛缁?30 娆″畨瑁?鍗歌浇鍏ㄩ儴姝ｇ‘锛屾棤宕╂簝锛?- funchook 鐨?`funchook_install/uninstall` 娌℃湁鈥滃仠姝㈠叾浠栫嚎绋嬧€濈殑閫夐」锛坒lags 淇濈暀涓?0锛夛紝绗﹀悎鍏堕潪绾跨▼瀹夊叏鐨勯鏈熴€?
+### plthook 缁嗚妭
 
-### plthook 细节
+- 浣跨敤鈥滀富绋嬪簭 鈫?鍏变韩搴撳鍑哄嚱鏁扳€濈殑 PLT 璋冪敤鐩爣锛坄target_plt` + `libtarget_shared.so`锛夛紱
+- 3 娆?脳 50 杞畨瑁?鍗歌浇鍏ㄩ儴閫氳繃锛岀洰鏍囧瓨娲伙紱blocked 璁℃暟涓?`hook_blocked` 涓€鑷村闀匡紱
+- 瀵?*鑷寘鍚洰鏍?*锛堝悓涓€鍙墽琛屾枃浠跺唴鐩存帴璋冪敤 `target_fn`锛夊畨瑁呰繑鍥?`-3`锛堟壘涓嶅埌 PLT 琛ㄩ」锛夛紝璇存槑鍏惰鐩栬寖鍥翠弗鏍煎彈闄愩€?
+## STW锛坰top the world锛夊疄鐜颁笌楠岃瘉
 
-- 使用“主程序 → 共享库导出函数”的 PLT 调用目标（`target_plt` + `libtarget_shared.so`）；
-- 3 次 × 50 轮安装/卸载全部通过，目标存活；blocked 计数与 `hook_blocked` 一致增长；
-- 对**自包含目标**（同一可执行文件内直接调用 `target_fn`）安装返回 `-3`（找不到 PLT 表项），说明其覆盖范围严格受限。
+`stw.c` 瀹炵幇浜嗕竴濂楃敤鎴锋€佷俊鍙峰仠杞︼細
 
-## STW（stop the world）实现与验证
-
-`stw.c` 实现了一套用户态信号停车：
-
-1. 注入器在 Frida attach **之前**读取 `/proc/<pid>/task`，把目标线程列表传给 agent（`test_set_threads`），Frida 自己的 helper 线程不会被停；
-2. install/uninstall 前向每个目标线程发 `SIGRTMIN+4`；handler 记录 `(tid, RIP)` 后自旋等待 release；
-3. handler 用 **epoch 计数**等待释放，避免“上一轮信号延迟到达 + 下一轮重置标志”把线程永久停住；
-4. 停车后检查每个线程的 PC 是否落在被覆盖的函数入口 16 字节内；若在，释放后重试（最多 50 次，间隔 200µs），直到所有线程都不在补丁区域；
-5. patch/恢复完成后置 release，等所有线程离开 handler。
-
-验证结果：
-
-| 场景 | 结果 |
+1. 娉ㄥ叆鍣ㄥ湪 Frida attach **涔嬪墠**璇诲彇 `/proc/<pid>/task`锛屾妸鐩爣绾跨▼鍒楄〃浼犵粰 agent锛坄test_set_threads`锛夛紝Frida 鑷繁鐨?helper 绾跨▼涓嶄細琚仠锛?2. install/uninstall 鍓嶅悜姣忎釜鐩爣绾跨▼鍙?`SIGRTMIN+4`锛沨andler 璁板綍 `(tid, RIP)` 鍚庤嚜鏃嬬瓑寰?release锛?3. handler 鐢?**epoch 璁℃暟**绛夊緟閲婃斁锛岄伩鍏嶁€滀笂涓€杞俊鍙峰欢杩熷埌杈?+ 涓嬩竴杞噸缃爣蹇椻€濇妸绾跨▼姘镐箙鍋滀綇锛?4. 鍋滆溅鍚庢鏌ユ瘡涓嚎绋嬬殑 PC 鏄惁钀藉湪琚鐩栫殑鍑芥暟鍏ュ彛 16 瀛楄妭鍐咃紱鑻ュ湪锛岄噴鏀惧悗閲嶈瘯锛堟渶澶?50 娆★紝闂撮殧 200碌s锛夛紝鐩村埌鎵€鏈夌嚎绋嬮兘涓嶅湪琛ヤ竵鍖哄煙锛?5. patch/鎭㈠瀹屾垚鍚庣疆 release锛岀瓑鎵€鏈夌嚎绋嬬寮€ handler銆?
+楠岃瘉缁撴灉锛?
+| 鍦烘櫙 | 缁撴灉 |
 |---|---|
-| funchook 无 STW，3×50 轮 live 安装/卸载 | 1 次通过，**2 次目标崩溃** |
-| funchook + STW，3×50 轮 live 安装/卸载 | **3 次全部通过**，目标存活，blocked 计数持续增长，卸载后 `call` 恢复 105 |
-| funchook + STW，pause 后安装/恢复 | 通过（恢复后 worker 继续正常计数） |
-| plthook 无 STW | 3×50 轮通过（GOT 指针原子写，不需要 STW） |
+| funchook 鏃?STW锛?脳50 杞?live 瀹夎/鍗歌浇 | 1 娆￠€氳繃锛?*2 娆＄洰鏍囧穿婧?* |
+| funchook + STW锛?脳50 杞?live 瀹夎/鍗歌浇 | **3 娆″叏閮ㄩ€氳繃**锛岀洰鏍囧瓨娲伙紝blocked 璁℃暟鎸佺画澧為暱锛屽嵏杞藉悗 `call` 鎭㈠ 105 |
+| funchook + STW锛宲ause 鍚庡畨瑁?鎭㈠ | 閫氳繃锛堟仮澶嶅悗 worker 缁х画姝ｅ父璁℃暟锛?|
+| plthook 鏃?STW | 3脳50 杞€氳繃锛圙OT 鎸囬拡鍘熷瓙鍐欙紝涓嶉渶瑕?STW锛?|
 
-实测 STW 开销：一次 install 通常需要 1–5 轮停车（每轮 ~0.1–1ms），主要在等线程进入 handler 与避开 PC 落在补丁区域的线程；运行期无额外开销。
+瀹炴祴 STW 寮€閿€锛氫竴娆?install 閫氬父闇€瑕?1鈥? 杞仠杞︼紙姣忚疆 ~0.1鈥?ms锛夛紝涓昏鍦ㄧ瓑绾跨▼杩涘叆 handler 涓庨伩寮€ PC 钀藉湪琛ヤ竵鍖哄煙鐨勭嚎绋嬶紱杩愯鏈熸棤棰濆寮€閿€銆?
+### 涓荤嚎绋嬭皟鐢ㄦ寕璧凤細瀹氫綅涓庝慨澶?
+鏃╂湡鐗堟湰涓紝hook 瀹夎鍚庝粠鐩爣**涓荤嚎绋?*璋冪敤 `target_fn` 浼氬嚭鐜扳€滄棤鍝嶅簲鈥濓紝鑰?worker 绾跨▼璋冪敤姝ｅ父銆傚畾浣嶈繃绋嬶細
 
-### 主线程调用挂起：定位与修复
+- 鍦?guard 鍐呮墦鐐癸紙杩涘叆 `G`銆佽皟鐢?VM 鍓?`V`銆佽繑鍥炲悗 `D`銆佸懡涓?BLOCK `R`锛夛紝骞惰 target 鎶?`call` 鐨勮繘鍏?閫€鍑?鎵撳嵃鍐欏叆 `/tmp/vg_target_trace`锛涗慨澶嶅悗姣忔涓荤嚎绋嬭皟鐢ㄩ兘鑳界湅鍒板畬鏁?`GVDR` 涓?`call-enter/exit/printed`锛?- 閫氳繃 Frida RPC 鐩存帴璋冪敤 guard 鍑芥暟锛堜笉缁忚繃 hook锛夊缁堟甯革紝璇存槑 guard/VM 鏈韩娌￠棶棰橈紱
+- 鍞竴涓€娆″彲澶嶇幇鐨勬寕璧峰嚭鐜板湪涓€娆?**STW dirty-PC 妫€鏌ュけ璐ャ€乽ninstall 杩斿洖 -2** 涔嬪悗锛涜璺緞浼氭妸 hook 鐣欏湪宸插畨瑁呯姸鎬佸苟缁х画鍚庣画璋冪敤锛?- 鎹淇浜嗕笁澶勬椂搴忛棶棰橈細
+  1. **VM program 鍦?install 闃舵鍒濆鍖?*锛堣€屼笉鏄?guard 棣栨璋冪敤鏃舵噿鍒濆鍖栵級锛宍program_ready` 鐢ㄥ師瀛愬彉閲忥紱
+  2. install/uninstall 鐨?STW 閮?*閲嶈瘯鐩村埌鎵€鏈夌嚎绋?RIP 涓嶅湪琛ヤ竵 16 瀛楄妭绐楀彛鍐?*锛堟渶澶?50 娆★級锛?  3. STW 鏀逛负 **epoch 閲婃斁鍗忚**锛歨andler 绛夊緟鈥滈噴鏀?epoch 鈮?杩涘叆 epoch鈥濓紝杞涔嬮棿涓嶄細鎶婃棫 handler 鐨勯噴鏀炬爣蹇楅噸缃紱姣忚疆寮€濮嬪墠绛夊緟涓婁竴杞?handler 鍏ㄩ儴閫€鍑猴紝瓒呮椂 500ms銆?
+楠岃瘉锛堜慨澶嶅悗锛夛細
 
-早期版本中，hook 安装后从目标**主线程**调用 `target_fn` 会出现“无响应”，而 worker 线程调用正常。定位过程：
+- 涓荤嚎绋?`pause` 鍚庤繛缁?**200 杞?* install 鈫?`call`(-73) 鈫?uninstall 鈫?`call`(105)锛氬叏閮ㄩ€氳繃锛岀洰鏍囧瓨娲伙紱
+- 鍘熸寕璧峰鐜拌剼鏈噸澶?**5 娆?*锛氬叏閮ㄩ€氳繃锛?- 浠呭仛 patch 寰幆锛坵orker pause锛屼笉璋冪敤 hook锛?*500 杞?*锛氬叏閮ㄩ€氳繃锛?- live锛? worker 鐑惊鐜€?0 杞?install/uninstall锛夎繛缁?5 娆★細**3 娆″畬鍏ㄩ€氳繃锛? 娆″湪缁撴潫闃舵鐩爣浠?SIGSEGV/-9 閫€鍑?*锛堜笉鏄富绾跨▼璋冪敤鎸傝捣锛屽彂鐢熷湪娴嬭瘯鏀跺熬/detach 鍓嶅悗锛夈€傚洜姝や富绾跨▼璋冪敤闂宸蹭慨澶嶏紝浣嗏€滈珮棰?live patch + teardown鈥濅粛鏈夋畫浣欑珵鎬併€?
+### 娈嬩綑闄愬埗
 
-- 在 guard 内打点（进入 `G`、调用 VM 前 `V`、返回后 `D`、命中 BLOCK `R`），并让 target 把 `call` 的进入/退出/打印写入 `/tmp/vg_target_trace`；修复后每次主线程调用都能看到完整 `GVDR` 与 `call-enter/exit/printed`；
-- 通过 Frida RPC 直接调用 guard 函数（不经过 hook）始终正常，说明 guard/VM 本身没问题；
-- 唯一一次可复现的挂起出现在一次 **STW dirty-PC 检查失败、uninstall 返回 -2** 之后；该路径会把 hook 留在已安装状态并继续后续调用；
-- 据此修复了三处时序问题：
-  1. **VM program 在 install 阶段初始化**（而不是 guard 首次调用时懒初始化），`program_ready` 用原子变量；
-  2. install/uninstall 的 STW 都**重试直到所有线程 RIP 不在补丁 16 字节窗口内**（最多 50 次）；
-  3. STW 改为 **epoch 释放协议**：handler 等待“释放 epoch ≥ 进入 epoch”，轮次之间不会把旧 handler 的释放标志重置；每轮开始前等待上一轮 handler 全部退出，超时 500ms。
-
-验证（修复后）：
-
-- 主线程 `pause` 后连续 **200 轮** install → `call`(-73) → uninstall → `call`(105)：全部通过，目标存活；
-- 原挂起复现脚本重复 **5 次**：全部通过；
-- 仅做 patch 循环（worker pause，不调用 hook）**500 轮**：全部通过；
-- live（4 worker 热循环、50 轮 install/uninstall）连续 5 次：**3 次完全通过，2 次在结束阶段目标以 SIGSEGV/-9 退出**（不是主线程调用挂起，发生在测试收尾/detach 前后）。因此主线程调用问题已修复，但“高频 live patch + teardown”仍有残余竞态。
-
-### 残余限制
-
-- **live patch 仍偶发结束阶段崩溃/挂起**（SIGSEGV 或未退出），即使换成简单常量 guard 也会出现 → 问题在 inline patch/STW 与 funchook 的交互，不在 VM/主线程；当前可用的稳定模式是**quiesced（目标线程暂停后再 patch）**；
-- 线程列表由注入器在 attach 前快照，**补丁期间新建的线程不会被停**；需要周期性重新枚举或“先停住创建线程（clone hook）”；
-- PC 落在补丁区域靠重试，极端热的小函数可能多次重试；
-- 信号停车要求目标线程可被信号打断（长时间不可中断睡眠/屏蔽该信号会超时）；
-- funchook 的 trampoline 在卸载后**故意不释放**（避免线程仍在 trampoline 中时被 free 成 SIGSEGV），会带来每次 patch 的少量内存泄漏；生产需做 trampoline 范围跟踪后再安全释放。
-
-### 单次 live 安装/卸载验证（非高频）
-
-用 `single_install.py` 模拟正常生产用法：4 个 worker 持续调用 → 安装一次 → 观察 50ms → 卸载一次 → 观察 50ms → 主线程调用确认恢复 105 → 退出；每个模式重复 20 个进程。
-
-| 模式 | 结果 | 说明 |
+- **live patch 浠嶅伓鍙戠粨鏉熼樁娈靛穿婧?鎸傝捣**锛圫IGSEGV 鎴栨湭閫€鍑猴級锛屽嵆浣挎崲鎴愮畝鍗曞父閲?guard 涔熶細鍑虹幇 鈫?闂鍦?inline patch/STW 涓?funchook 鐨勪氦浜掞紝涓嶅湪 VM/涓荤嚎绋嬶紱褰撳墠鍙敤鐨勭ǔ瀹氭ā寮忔槸**quiesced锛堢洰鏍囩嚎绋嬫殏鍋滃悗鍐?patch锛?*锛?- 绾跨▼鍒楄〃鐢辨敞鍏ュ櫒鍦?attach 鍓嶅揩鐓э紝**琛ヤ竵鏈熼棿鏂板缓鐨勭嚎绋嬩笉浼氳鍋?*锛涢渶瑕佸懆鏈熸€ч噸鏂版灇涓炬垨鈥滃厛鍋滀綇鍒涘缓绾跨▼锛坈lone hook锛夆€濓紱
+- PC 钀藉湪琛ヤ竵鍖哄煙闈犻噸璇曪紝鏋佺鐑殑灏忓嚱鏁板彲鑳藉娆￠噸璇曪紱
+- 淇″彿鍋滆溅瑕佹眰鐩爣绾跨▼鍙淇″彿鎵撴柇锛堥暱鏃堕棿涓嶅彲涓柇鐫＄湢/灞忚斀璇ヤ俊鍙蜂細瓒呮椂锛夛紱
+- funchook 鐨?trampoline 鍦ㄥ嵏杞藉悗**鏁呮剰涓嶉噴鏀?*锛堥伩鍏嶇嚎绋嬩粛鍦?trampoline 涓椂琚?free 鎴?SIGSEGV锛夛紝浼氬甫鏉ユ瘡娆?patch 鐨勫皯閲忓唴瀛樻硠婕忥紱鐢熶骇闇€鍋?trampoline 鑼冨洿璺熻釜鍚庡啀瀹夊叏閲婃斁銆?
+### 鍗曟 live 瀹夎/鍗歌浇楠岃瘉锛堥潪楂橀锛?
+鐢?`single_install.py` 妯℃嫙姝ｅ父鐢熶骇鐢ㄦ硶锛? 涓?worker 鎸佺画璋冪敤 鈫?瀹夎涓€娆?鈫?瑙傚療 50ms 鈫?鍗歌浇涓€娆?鈫?瑙傚療 50ms 鈫?涓荤嚎绋嬭皟鐢ㄧ‘璁ゆ仮澶?105 鈫?閫€鍑猴紱姣忎釜妯″紡閲嶅 20 涓繘绋嬨€?
+| 妯″紡 | 缁撴灉 | 璇存槑 |
 |---|---|---|
-| **BLOCK** | **17/20 成功** | 安装/生效/卸载/恢复均正确；3 次失败都是**进程退出阶段** SIGSEGV/SIGTRAP（-11/-5），不是 patch 逻辑错误 |
-| **PASS** | **0/3 ~ 1/3 成功** | live 下 PASS 路径会崩溃；把 worker 暂停后 PASS 单次调用正常（返回 105 且原函数执行） |
+| **BLOCK** | **17/20 鎴愬姛** | 瀹夎/鐢熸晥/鍗歌浇/鎭㈠鍧囨纭紱3 娆″け璐ラ兘鏄?*杩涚▼閫€鍑洪樁娈?* SIGSEGV/SIGTRAP锛?11/-5锛夛紝涓嶆槸 patch 閫昏緫閿欒 |
+| **PASS** | **0/3 ~ 1/3 鎴愬姛** | live 涓?PASS 璺緞浼氬穿婧冿紱鎶?worker 鏆傚仠鍚?PASS 鍗曟璋冪敤姝ｅ父锛堣繑鍥?105 涓斿師鍑芥暟鎵ц锛?|
 
-结论：
+缁撹锛?
+- **鍗曟 live BLOCK 琛ヤ竵鍩烘湰鍙敤**锛屽墿浣欓棶棰樻槸閫€鍑洪樁娈靛穿婧冿紙闇€瑕佺户缁畾浣?detach/淇″彿娓呯悊锛夛紱
+- **PASS 璺緞鍦?live 澶氱嚎绋嬩笅涓嶅彲鐢?*锛堝嵆浣?1 涓?worker 涔熷父宕╋級锛屾€€鐤?funchook 鐨?`real_target` trampoline 鍦ㄥ苟鍙戣皟鐢?闀胯窇涓嬪瓨鍦ㄩ噸鍏ユ垨閲嶅畾浣嶉棶棰橈紱quiesced 涓嬫甯搞€傜敓浜ц嫢闇€瑕?PASS 璇箟锛屽繀椤绘崲鐢ㄨ嚜寤?trampoline 鎴栨敼鐢?plthook/preload銆?
+## 缁撹
 
-- **单次 live BLOCK 补丁基本可用**，剩余问题是退出阶段崩溃（需要继续定位 detach/信号清理）；
-- **PASS 路径在 live 多线程下不可用**（即使 1 个 worker 也常崩），怀疑 funchook 的 `real_target` trampoline 在并发调用/长跑下存在重入或重定位问题；quiesced 下正常。生产若需要 PASS 语义，必须换用自建 trampoline 或改用 plthook/preload。
-
-## 结论
-
-1. **inline hook 库（funchook）不能直接用于“线程运行中”的热安装/卸载**；必须配合 stop-the-world。funchook 自身不提供，需要我们在注入器/agent 里实现。
-2. **plthook 可以安全地在线程运行时热安装/卸载**，但只覆盖经过动态符号表（PLT）的调用；适合作为“动态符号热补丁”的快速路径。
-3. Frida 的 `Thread.suspend` 在 17.26.2 中不可用（实测 `TypeError: not a function`），因此停线程需要在原生层实现，候选：
-   - 给目标所有线程发信号，在信号 handler 中自旋等待一个原子标志（handler 停住后由注入线程 patch，再释放）；
-   - 外部 `ptrace(PTRACE_SEIZE)` 逐个线程挂起（需要权限，且与 Frida 注入共存需验证）；
-   - 使用提供 stop-the-world 的引擎（Detours 有 `DetourTransactionBegin/Commit`；但 Windows 单平台）。
-4. 对 VulGate 的可行方向：
-   - **原生 inline hook + 自实现 stop-the-world**：满足热、多线程、不重建、低运行开销；
-   - **plthook 热路径**：不需要停线程，覆盖 PLT 符号；可与现有 preload 模式共用规则/VM；
-   - 不建议把 funchook 直接放进当前 Frida JS 路径；它需要原生注入器或 CModule/agent 承载。
-5. 未验证：ARM64、Windows（MinHook/Detours）、macOS、真实 nginx/httpd 目标。
-
-## 复现
+1. **inline hook 搴擄紙funchook锛変笉鑳界洿鎺ョ敤浜庘€滅嚎绋嬭繍琛屼腑鈥濈殑鐑畨瑁?鍗歌浇**锛涘繀椤婚厤鍚?stop-the-world銆俧unchook 鑷韩涓嶆彁渚涳紝闇€瑕佹垜浠湪娉ㄥ叆鍣?agent 閲屽疄鐜般€?2. **plthook 鍙互瀹夊叏鍦板湪绾跨▼杩愯鏃剁儹瀹夎/鍗歌浇**锛屼絾鍙鐩栫粡杩囧姩鎬佺鍙疯〃锛圥LT锛夌殑璋冪敤锛涢€傚悎浣滀负鈥滃姩鎬佺鍙风儹琛ヤ竵鈥濈殑蹇€熻矾寰勩€?3. Frida 鐨?`Thread.suspend` 鍦?17.26.2 涓笉鍙敤锛堝疄娴?`TypeError: not a function`锛夛紝鍥犳鍋滅嚎绋嬮渶瑕佸湪鍘熺敓灞傚疄鐜帮紝鍊欓€夛細
+   - 缁欑洰鏍囨墍鏈夌嚎绋嬪彂淇″彿锛屽湪淇″彿 handler 涓嚜鏃嬬瓑寰呬竴涓師瀛愭爣蹇楋紙handler 鍋滀綇鍚庣敱娉ㄥ叆绾跨▼ patch锛屽啀閲婃斁锛夛紱
+   - 澶栭儴 `ptrace(PTRACE_SEIZE)` 閫愪釜绾跨▼鎸傝捣锛堥渶瑕佹潈闄愶紝涓斾笌 Frida 娉ㄥ叆鍏卞瓨闇€楠岃瘉锛夛紱
+   - 浣跨敤鎻愪緵 stop-the-world 鐨勫紩鎿庯紙Detours 鏈?`DetourTransactionBegin/Commit`锛涗絾 Windows 鍗曞钩鍙帮級銆?4. 瀵?VulGate 鐨勫彲琛屾柟鍚戯細
+   - **鍘熺敓 inline hook + 鑷疄鐜?stop-the-world**锛氭弧瓒崇儹銆佸绾跨▼銆佷笉閲嶅缓銆佷綆杩愯寮€閿€锛?   - **plthook 鐑矾寰?*锛氫笉闇€瑕佸仠绾跨▼锛岃鐩?PLT 绗﹀彿锛涘彲涓庣幇鏈?preload 妯″紡鍏辩敤瑙勫垯/VM锛?   - 涓嶅缓璁妸 funchook 鐩存帴鏀捐繘褰撳墠 Frida JS 璺緞锛涘畠闇€瑕佸師鐢熸敞鍏ュ櫒鎴?CModule/agent 鎵胯浇銆?5. 鏈獙璇侊細ARM64銆乄indows锛圡inHook/Detours锛夈€乵acOS銆佺湡瀹?nginx/httpd 鐩爣銆?
+## 澶嶇幇
 
 ```sh
-# 依赖放在 /tmp/mature-hooks（见 build.sh 的 FUNCHOOK_DIR / PLTHOOK_DIR）
-git clone --depth 1 https://github.com/kubo/funchook.git /tmp/mature-hooks/funchook
+# 渚濊禆鏀惧湪 /tmp/mature-hooks锛堣 build.sh 鐨?FUNCHOOK_DIR / PLTHOOK_DIR锛?git clone --depth 1 https://github.com/kubo/funchook.git /tmp/mature-hooks/funchook
 cmake -S /tmp/mature-hooks/funchook -B /tmp/mature-hooks/funchook/build -DFUNCHOOK_BUILD_TESTS=OFF
 cmake --build /tmp/mature-hooks/funchook/build -j4
 git clone --depth 1 https://github.com/kubo/plthook.git /tmp/mature-hooks/plthook
@@ -126,5 +86,4 @@ PYTHONPATH=/tmp/vulgate-frida-deps-20261111 python3 experiments/mature-hooks/run
   --target experiments/mature-hooks/target_plt --cycles 50
 ```
 
-`runner.py` 的参数：`--cycles`（安装/卸载轮数）、`--quiesced-cycles`（pause 后轮数）、`--skip-live`、
-`--target`、`--result`。本轮结果来自上述命令的多次运行。
+`runner.py` 鐨勫弬鏁帮細`--cycles`锛堝畨瑁?鍗歌浇杞暟锛夈€乣--quiesced-cycles`锛坧ause 鍚庤疆鏁帮級銆乣--skip-live`銆?`--target`銆乣--result`銆傛湰杞粨鏋滄潵鑷笂杩板懡浠ょ殑澶氭杩愯銆?

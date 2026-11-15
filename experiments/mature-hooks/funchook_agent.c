@@ -112,7 +112,18 @@ static int guard(int value)
         return -73;
     }
     pass_calls++;
-    return real_target(value);
+    {
+        static _Atomic int pass_debug;
+        int debug_index = atomic_fetch_add(&pass_debug, 1);
+        if (debug_index < 8) {
+            write(2, "p", 1);
+        }
+        int result = real_target(value);
+        if (debug_index < 8) {
+            write(2, "q", 1);
+        }
+        return result;
+    }
 }
 
 __attribute__((visibility("default")))
@@ -167,10 +178,9 @@ int test_uninstall(void)
     if (uninstall_rc != 0) {
         return -1;
     }
-    /* Deliberately keep the funchook object and its trampolines alive: a worker may
-     * still be executing the near-trampoline when uninstall restores the target,
-     * and freeing it would turn that into a SIGSEGV. Reusing/freeing safely needs
-     * trampoline range tracking in the STW dirty check. */
+#ifdef VG_DESTROY_HOOK
+    funchook_destroy(hook);
+#endif
     hook = 0;
     installed = 0;
     real_target = (int (*)(int))dlsym(RTLD_DEFAULT, "target_fn");
@@ -242,6 +252,7 @@ int test_set_threads(const char *csv)
     stw_set_known_threads(tids, count);
     return count;
 }
+
 
 
 
