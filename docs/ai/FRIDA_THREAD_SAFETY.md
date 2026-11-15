@@ -98,7 +98,7 @@ LD_PRELOAD=$PWD/libvgpreload.so ./target
 - funchook + STW：3×50 轮曾全部通过；修复主线程调用问题后，反复 5 次 live 压测仍有 2 次在测试收尾阶段目标 SIGSEGV/未退出（换成简单 guard 也复现），问题定位在 inline patch/STW 与 funchook 的交互，而非 VM；当前稳定模式是 quiesced（先暂停目标线程再 patch）；
 - 早期“主线程调用挂起”已修复：给 guard 打点（GVDR）确认主线程调用完整走通；修复为 VM 在 install 阶段初始化（原子 ready）、install/uninstall 的 STW 重试到 PC 不在补丁窗口、epoch/每线程 parked 状态停车协议。验证：主线程连续 200 轮 install→call→uninstall→call 通过，5 次原复现全部通过，500 轮纯 patch 循环通过；
 - 残余风险：live patch 收尾偶发崩溃/不退出、补丁期间新建线程不会被停、trampoline 故意泄漏（避免 free 后 SIGSEGV）。
-- 单次 live 验证（`single_install.py`，4 worker）：BLOCK 20/20 成功（Frida 保持 attach 至目标退出；提前 detach 会 -11/-5）。PASS 安装+运行+退出 3/3 干净，但 **uninstall 后退出 -6/-11**（3/3，暂停 worker 也一样）→ PASS 场景暂时不能 uninstall；需自建 trampoline 或 plthook/preload。
+- 单次 live 验证（`single_install.py`，4 worker）：BLOCK 20/20 成功（Frida 保持 attach 至目标退出；提前 detach 会 -11/-5）。PASS 硬 uninstall 后退出 3/3 -6/-11；soft uninstall 3/5 干净、2/5 仍 -6/-11 → 根因进一步缩小到 funchook trampoline 在高频并发 PASS 调用下不稳定，需自建 trampoline 或 plthook/preload。
 
 
 

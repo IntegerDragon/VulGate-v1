@@ -39,6 +39,7 @@ static uintptr_t trampoline_address = 0;
 static unsigned long long blocked_calls = 0;
 static unsigned long long pass_calls = 0;
 static _Atomic int trace_on = 0;
+static _Atomic int guard_active = 1;
 
 int safe_read(void *dst, const void *src, size_t len)
 {
@@ -49,6 +50,10 @@ int safe_read(void *dst, const void *src, size_t len)
 
 static int guard(int value)
 {
+    if (!atomic_load(&guard_active)) {
+        pass_calls++;
+        return real_target(value);
+    }
 #ifdef VG_NO_TRACE
     int trace = 0;
 #else
@@ -130,6 +135,7 @@ static int guard(int value)
 __attribute__((visibility("default")))
 int test_install(void)
 {
+    atomic_store(&guard_active, 1);
     if (installed) {
         return 0;
     }
@@ -167,6 +173,13 @@ int test_uninstall(void)
     if (!installed) {
         return 0;
     }
+#ifdef VG_RULE_PASS
+    /* Soft uninstall: keep the funchook trampoline mapped (hard uninstall after
+     * PASS calls aborts at process exit) but restore original behaviour. */
+    atomic_store(&guard_active, 0);
+    installed = 0;
+    return 0;
+#endif
 #ifdef VG_UNINSTALL_ONE
     int uninstall_attempts = 1;
 #else
@@ -255,6 +268,7 @@ int test_set_threads(const char *csv)
     stw_set_known_threads(tids, count);
     return count;
 }
+
 
 
 
