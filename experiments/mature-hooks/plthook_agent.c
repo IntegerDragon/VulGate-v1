@@ -1,4 +1,4 @@
-/* Mature-library test agent: plthook GOT patching + in-tree VM. */
+﻿/* Mature-library test agent: plthook GOT patching + in-tree VM. */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
@@ -13,10 +13,17 @@
 #include "vm.c"
 #include "plthook.h"
 
+#ifdef VG_RULE_PASS
+static const unsigned char block_code[] = {
+    0xb7, 0, 0, 0, 0, 0, 0, 0,
+    0x95, 0, 0, 0, 0, 0, 0, 0
+};
+#else
 static const unsigned char block_code[] = {
     0xb7, 0, 0, 0, 1, 0, 0, 0,
     0x95, 0, 0, 0, 0, 0, 0, 0
 };
+#endif
 
 static shadow_program program;
 static _Atomic int program_ready = 0;
@@ -115,3 +122,4 @@ unsigned long long test_passed(void) { return pass_calls; }
 
 __attribute__((visibility("default")))
 const char *test_name(void) { return "plthook"; }
+

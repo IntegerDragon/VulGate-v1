@@ -78,7 +78,10 @@ rpc.exports = {
 };
 ''' % json.dumps(str(lib)))
         script.load()
-        script.exports_sync.set_threads(','.join(map(str, tids)))
+        try:
+            script.exports_sync.set_threads(','.join(map(str, tids)))
+        except Exception:
+            pass  # plthook backend does not need STW thread lists
         baseline = target.command('status')
         install_rc = script.exports_sync.install()
         time.sleep(0.05)
@@ -93,7 +96,10 @@ rpc.exports = {
         final_call = target.command('call')
         # Keep the Frida session attached until the target exits: detaching
         # first races with target teardown in this environment.
-        script.exports_sync.cleanup()
+        try:
+            script.exports_sync.cleanup()
+        except Exception:
+            pass
         exit_code, stderr = target.close()
         try:
             session.detach()
@@ -189,4 +195,6 @@ def main() -> int:
 
 if __name__ == '__main__':
     sys.exit(main())
+
+
 
