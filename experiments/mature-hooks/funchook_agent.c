@@ -35,6 +35,7 @@ static int installed = 0;
 static funchook_t *hook = 0;
 static int (*real_target)(int) = 0;
 static void *target_address = 0;
+static uintptr_t trampoline_address = 0;
 static unsigned long long blocked_calls = 0;
 static unsigned long long pass_calls = 0;
 static _Atomic int trace_on = 0;
@@ -146,6 +147,7 @@ int test_install(void)
     if (funchook_prepare(hook = funchook_create(), (void **)&real_target, (void *)guard) != 0) {
         return -2;
     }
+    trampoline_address = (uintptr_t)real_target;
     int stw_rc = stw_begin_clean((uintptr_t)target_address, 16, 50);
     if (stw_rc != 0) {
         return stw_rc == -1 ? -5 : -7;
@@ -170,7 +172,8 @@ int test_uninstall(void)
 #else
     int uninstall_attempts = 50;
 #endif
-    if (stw_begin_clean((uintptr_t)target_address, 16, uninstall_attempts) != 0) {
+    if (stw_begin_clean((uintptr_t)target_address, 16, trampoline_address, 4096,
+                         uninstall_attempts) != 0) {
         return -2;
     }
     int uninstall_rc = funchook_uninstall(hook, 0);

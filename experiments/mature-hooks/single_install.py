@@ -91,10 +91,15 @@ rpc.exports = {
         time.sleep(0.05)
         settled = target.command('status')
         final_call = target.command('call')
+        # Keep the Frida session attached until the target exits: detaching
+        # first races with target teardown in this environment.
         script.exports_sync.cleanup()
-        session.detach()
-        session = None
         exit_code, stderr = target.close()
+        try:
+            session.detach()
+        except Exception:
+            pass
+        session = None
 
         errors = []
         if install_rc != 0:

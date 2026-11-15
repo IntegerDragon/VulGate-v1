@@ -156,6 +156,7 @@ static void stw_init(void)
 /* Park every non-Frida thread except the caller. Returns 0 on success, -1 when
  * not every thread could be parked within the timeout. */
 static int stw_begin(uintptr_t range_start, size_t range_size,
+                     uintptr_t range2_start, size_t range2_size,
                      unsigned long long *dirty_threads)
 {
     pid_t self = (pid_t)syscall(SYS_gettid);
@@ -200,7 +201,8 @@ static int stw_begin(uintptr_t range_start, size_t range_size,
     if (dirty_threads) {
         for (int index = 0; index < count; index++) {
             uintptr_t pc = parked_pc[index];
-            if (pc >= range_start && pc < range_start + range_size) {
+            if ((pc >= range_start && pc < range_start + range_size) ||
+                (pc >= range2_start && pc < range2_start + range2_size)) {
                 (*dirty_threads)++;
             }
         }
@@ -240,11 +242,12 @@ void stw_cleanup(void)
 }
 
 static int stw_begin_clean(uintptr_t range_start, size_t range_size,
+                           uintptr_t range2_start, size_t range2_size,
                            int max_attempts)
 {
     for (int attempt = 0; attempt < max_attempts; attempt++) {
         unsigned long long dirty = 0;
-        if (stw_begin(range_start, range_size, &dirty) != 0) {
+        if (stw_begin(range_start, range_size, range2_start, range2_size, &dirty) != 0) {
             stw_retries++;
             stw_end();
             usleep(200);
