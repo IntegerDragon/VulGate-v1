@@ -3,20 +3,20 @@
 `runtime/dsl/` 是补丁 DSL 的编译/解释层：把“挂载点 + 行为”的补丁描述编译成
 Frida agent（`NativeCallback` + `SystemFunction`），在目标进程里安装并执行。
 
-## DSL 语法
+## DSL 语法（英文关键字）
 
 ```text
-动作 NGX_ERROR_RETURN:
+action NGX_ERROR_RETURN:
 {
-    返回类型: int
-    返回: -1
+    return_type: int
+    return: -1
 }
 
-挂载点 CVE-2026-97205:
+mount CVE-2026-97205:
 {
-    位置: symbol="ngx_http_copy_filter", 参数=[pointer, pointer], 返回=int64
-    性质: 拦截点
-    行为:
+    location: symbol="ngx_http_copy_filter", args=[pointer, pointer], return=int64
+    nature: intercept
+    behavior:
     {
         value["counter"] = vg_read_u32(vg_read_pointer(arg0 + 1000) + 1181);
         if ((value["counter"] & 255) >= 250) {
@@ -26,12 +26,33 @@ Frida agent（`NativeCallback` + `SystemFunction`），在目标进程里安装�
 }
 ```
 
-- `挂载点 <id>:`：一个挂载点；
-- `位置`：`module`（可选）、`symbol`、`参数`、`返回`；
-- `性质`：`读取点` 或 `拦截点`；
-- `行为`：C 风格语句。`value["x"] = ...` 写入观察值，后续可直接读 `value["x"]`；
+- `mount <id>:`：一个挂载点；
+- `location`：`module`（可选）、`symbol`、`offset`（本地符号）、`args`、`return`；
+- `nature`：`read_point` 或 `intercept`；
+- `behavior`：C 风格语句。`value["x"] = ...` 写入观察值，后续可直接读 `value["x"]`；
   `return block("ACTION");` 表示 BLOCK；不写 return 则落到 PASS，调用原函数；
-- `动作 <id>:`：BLOCK 返回动作；`返回类型`/`返回`/可选 `errno`。
+- `action <id>:`：BLOCK 返回动作；`return_type`/`return`/可选 `errno`。
+
+旧的中文关键字（`动作/挂载点/位置/性质/行为/读取点/拦截点/参数/返回类型/返回`）仍被解析器接受，
+但生成器和仓库内 20 个补丁统一使用英文。
+
+## 编译实现
+
+1. `parser.py`：扫描 `action`/`mount` 顶层块，按花括号配平提取 `behavior`；
+   解析 `location` 的 `module/symbol/offset/args/return` 和动作字段；
+2. `compiler.py` 把每个 mount 编译成一个 Frida agent 片段：
+   - 每个 `value["x"] = <expr>` 变成 `value["x"] = vg_sel("x", () => (<expr>))`
+     （生产模式执行真实内存读取；验证模式可注入 selector 值）；
+   - `return block("ACTION")` 变成 `return vg_block("ACTION")`；
+   - C 风格临时变量/`for` 声明转成 JS `let`；
+   - 动作表编译为 JS 对象，`vg_block` 按返回类型生成返回值/`errno`；
+   - 每个 mount 生成：
+     - `new SystemFunction(target, return_type, args)` 保存原函数；
+     - `new NativeCallback(function(arg0...) { ...; return original(...); }, ...)`；
+     - `Interceptor.replace(target, callback)` 安装；
+   - 支持 `offset`：`module.base.add(offset)` 解析本地符号；
+3. `run.py`：Frida Python 读取 DSL → 编译 → attach/spawn → 安装；
+   `validate20.py`：合成 fixture 验证 BLOCK/PASS/memory 场景。
 
 ## 编译/安装
 

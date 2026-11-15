@@ -152,7 +152,7 @@ def _action_block(name: str, action: dict) -> str:
         return_type, value = 'int64', str(int(action.get('value', 0)))
     else:
         return_type, value = 'int', str(int(action.get('value', 0)))
-    lines = [f'动作 {name}:', '{', f'    返回类型: {return_type}', f'    返回: {value}']
+    lines = [f'action {name}:', '{', f'    return_type: {return_type}', f'    return: {value}']
     if action.get('errno') is not None:
         lines.append(f'    errno: {int(action["errno"])}')
     lines.append('}')
@@ -199,13 +199,13 @@ def generate_case(case_dir: Path, specs_root: Path) -> tuple[str, str]:
         module = guard.get('module')
         module_attr = f'module="{module}", ' if module else ''
         location = (f'{module_attr}symbol="{guard["function"]}", '
-                    f'参数=[{", ".join(guard.get("arg_types") or [])}], '
-                    f'返回={guard.get("return_type", "int")}')
-        chunks.append(f'''挂载点 {case_dir.name}/{guard["id"]}:
+                    f'args=[{", ".join(guard.get("arg_types") or [])}], '
+                    f'return={guard.get("return_type", "int")}')
+        chunks.append(f'''mount {case_dir.name}/{guard["id"]}:
 {{
-    位置: {location}
-    性质: 拦截点
-    行为:
+    location: {location}
+    nature: intercept
+    behavior:
     {{
 {chr(10).join(body_lines)}
     }}

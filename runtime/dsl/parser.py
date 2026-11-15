@@ -206,7 +206,7 @@ def _parse_location(text: str) -> tuple[str | None, str, list[str], str, int | N
 def _parse_action(identifier: str, body: str) -> ActionSpec:
     fields = _split_fields(body)
     return_type = fields.get('返回类型', fields.get('return_type', 'int')).strip()
-    raw_value = fields.get('返回', fields.get('value', '0')).strip()
+    raw_value = fields.get('返回', fields.get('return', fields.get('value', '0'))).strip()
     if raw_value in ('null', 'NULL', 'nil'):
         value: object = None
     elif raw_value.startswith(('"', "'")):
@@ -223,32 +223,32 @@ def parse(text: str) -> PatchSpec:
     actions: dict[str, ActionSpec] = {}
     mounts: list[MountSpec] = []
     cursor = 0
-    pattern = re.compile(r'^(动作|挂载点)\s+([^\s:：]+)\s*[:：]\s*', re.M)
+    pattern = re.compile(r'^(动作|挂载点|action|mount)\s+([^\s:：]+)\s*[:：]\s*', re.M)
     while True:
         match = pattern.search(text, cursor)
         if not match:
             break
         kind, identifier = match.group(1), match.group(2)
         block, cursor = _find_block(text, match.end())
-        if kind == '动作':
+        if kind in ('动作', 'action'):
             actions[identifier] = _parse_action(identifier, block)
             continue
         fields = _split_fields(block)
-        location = fields.get('位置')
+        location = fields.get('位置', fields.get('location'))
         if not location:
             raise DSLParseError(f'mount {identifier} has no 位置')
         module, symbol, args, return_type, offset = _parse_location(location)
-        nature = fields.get('性质', '拦截点').strip()
-        if nature not in ('拦截点', '读取点', 'intercept', 'read'):
+        nature = fields.get('性质', fields.get('nature', '拦截点')).strip()
+        if nature not in ('拦截点', '读取点', 'intercept', 'read', 'read_point'):
             raise DSLParseError(f'mount {identifier} has invalid 性质: {nature}')
-        nature = '读取点' if nature in ('读取点', 'read') else '拦截点'
-        body = fields.get('行为')
+        nature = '读取点' if nature in ('读取点', 'read', 'read_point') else '拦截点'
+        body = fields.get('行为', fields.get('behavior'))
         if body is None:
             # 行为 usually opens a nested block: split_fields sees "行为: {" ... "}"
             body = ''
         # The behavior block is nested inside fields parsing; extract it from
         # the raw block for robustness.
-        behavior_match = re.search(r'行为\s*[:：]\s*', block)
+        behavior_match = re.search(r'(?:行为|behavior)\s*[:：]\s*', block)
         if not behavior_match:
             raise DSLParseError(f'mount {identifier} has no 行为')
         behavior, _ = _find_block(block, behavior_match.end())

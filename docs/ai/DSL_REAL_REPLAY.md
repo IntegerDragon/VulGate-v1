@@ -1,61 +1,37 @@
-# DSL 真实应用重放记录（qizhi-51）
+﻿# DSL 鐪熷疄搴旂敤閲嶆斁璁板綍锛坬izhi-51锛?
+鏃ユ湡锛?026-11-16  
+鐜锛歲izhi-51锛孶buntu 24.04锛孭ython 3.12 venv锛孎rida 17.26.2銆?
+## 鐩爣
 
-日期：2026-11-16  
-环境：qizhi-51，Ubuntu 24.04，Python 3.12 venv，Frida 17.26.2。
+鐢?`runtime/dsl` 缂栬瘧鐨勮ˉ涓佸畨瑁呭埌鐪熷疄搴旂敤杩涚▼锛岄噸鏀捐姹?鎿嶄綔锛屾瘮杈冨畨瑁呭墠鍚庤涓恒€?鏈褰曞彧瑕嗙洊宸插疄闄呰窇閫氱殑 nginx 閮ㄥ垎锛涘叾浣欑敤渚嬪垪鍑洪樆濉炲師鍥犮€?
+## 宸插畬鎴?
+### 鐪熷疄 nginx 1.31.6 + CVE-2026-27654
 
-## 目标
-
-用 `runtime/dsl` 编译的补丁安装到真实应用进程，重放请求/操作，比较安装前后行为。
-本记录只覆盖已实际跑通的 nginx 部分；其余用例列出阻塞原因。
-
-## 已完成
-
-### 真实 nginx 1.31.6 + CVE-2026-27654
-
-- 二进制：`build/benchmark20/nginx-1.31.6/nginx`（从本地仓库拷贝到服务器 `/tmp/nginx-1.31.6`）
-- 配置：`/tmp/ngx-replay/nginx.conf`，启用 `dav_methods`；
-- 补丁：`runtime/dsl/patches/CVE-2026-27654.vg`，由于 `ngx_http_dav_copy_move_handler`
-  是**本地符号**，使用 `runtime/frida/symbols.py` 计算 offset 后以
-  `位置: symbol="...", offset=0x1194c1` 安装；
-- 重放：
-
+- 浜岃繘鍒讹細`build/benchmark20/nginx-1.31.6/nginx`锛堜粠鏈湴浠撳簱鎷疯礉鍒版湇鍔″櫒 `/tmp/nginx-1.31.6`锛?- 閰嶇疆锛歚/tmp/ngx-replay/nginx.conf`锛屽惎鐢?`dav_methods`锛?- 琛ヤ竵锛歚runtime/dsl/patches/CVE-2026-27654.vg`锛岀敱浜?`ngx_http_dav_copy_move_handler`
+  鏄?*鏈湴绗﹀彿**锛屼娇鐢?`runtime/frida/symbols.py` 璁＄畻 offset 鍚庝互
+  `浣嶇疆: symbol="...", offset=0x1194c1` 瀹夎锛?- 閲嶆斁锛?
 ```
 baseline COPY /dav/source.txt -> 204
-安装 DSL 后 COPY /dav/source.txt -> 405
+瀹夎 DSL 鍚?COPY /dav/source.txt -> 405
 DSL hits = 1
 ```
 
-结论：**该补丁在真实 nginx 上正确挂载并按动作返回 405。**
+缁撹锛?*璇ヨˉ涓佸湪鐪熷疄 nginx 涓婃纭寕杞藉苟鎸夊姩浣滆繑鍥?405銆?*
 
-### 真实 nginx 1.31.6 + CVE-2026-42533
+### 鐪熷疄 nginx 1.31.6 + CVE-2026-42533
 
-- offset 安装成功，`ngx_http_map_variable` 命中 1 次；
-- 但 `/map/ordinary` 响应从 `200 "mapped"` 变为 `200 空`，未观察到明确错误状态；
-- 需要进一步确认 nginx 对 `ngx_http_map_variable` 返回值的处理路径，暂不算通过。
+- offset 瀹夎鎴愬姛锛宍ngx_http_map_variable` 鍛戒腑 1 娆★紱
+- 浣?`/map/ordinary` 鍝嶅簲浠?`200 "mapped"` 鍙樹负 `200 绌篳锛屾湭瑙傚療鍒版槑纭敊璇姸鎬侊紱
+- 闇€瑕佽繘涓€姝ョ‘璁?nginx 瀵?`ngx_http_map_variable` 杩斿洖鍊肩殑澶勭悊璺緞锛屾殏涓嶇畻閫氳繃銆?
+### 鐪熷疄 nginx 1.31.6 + CVE-2026-93479
 
-### 真实 nginx 1.31.6 + CVE-2026-93479
+- 瀹夎鎴愬姛锛宍ngx_http_script_check_length` 鍛戒腑 222064 娆★紱
+- 鍝嶅簲浠嶄负 200锛屽師鍥狅細璇?action 闇€瑕佸啓 `ngx_http_script_engine_t.ip/status`
+  锛堝姩浣?writes锛夛紝褰撳墠 DSL 缂栬瘧鍣ㄦ湭瀹炵幇 action writes銆?
+## 鏈畬鎴?/ 闃诲
 
-- 安装成功，`ngx_http_script_check_length` 命中 222064 次；
-- 响应仍为 200，原因：该 action 需要写 `ngx_http_script_engine_t.ip/status`
-  （动作 writes），当前 DSL 编译器未实现 action writes。
-
-## 未完成 / 阻塞
-
-1. **真实 PoC 不在仓库中**：原仓库只有 `build/benchmark20` 的普通功能请求语料
-   （`experiments/postdeploy/benchmark20/suite.py`），没有 20 个真实 exploit PoC。
-2. **多数应用符号是本地符号**：DSL 已支持 `offset`，但每个 app build 需要生成
-   offset 表；20 个 DSL 文件当前只写 symbol。
-3. **action writes 未实现**：影响 93479、42945、9256（写 engine 字段）。
-4. **PHP/Brotli**：服务器没有对应真实二进制/配置；需先构建或拷贝。
-5. **httpd 需模块**：`httpd` 二进制需要 `mod_*.so` 与 APR 环境；且 httpd 多线程，
-   当前 DSL 的 Frida NativeCallback 只适合单线程（可改 `ThreadsPerChild 1` 再测）。
-6. 现有 20 例 DSL 的“验证”是合成 fixture + selector 注入，不是真实应用；
-   本记录是真实应用重放的第一步。
-
-## 下一步
-
-1. 为每个 app build 生成 offset 表，批量把 20 个 DSL 的 `位置` 补成 module+offset；
-2. 实现 action writes（engine 字段/动作副作用）；
-3. 构建/拷贝 nginx/httpd/PHP/Brotli 真实目标，写 replay harness：
-   - 启动应用 → Frida 安装 DSL → 发请求/操作 → 比较 baseline/patched；
-4. 对条件补丁构造触发请求（alias/uri_changed、regex captures、blocked 阈值等）。
+1. **鐪熷疄 PoC 涓嶅湪浠撳簱涓?*锛氬師浠撳簱鍙湁 `build/benchmark20` 鐨勬櫘閫氬姛鑳借姹傝鏂?   锛坄experiments/postdeploy/benchmark20/suite.py`锛夛紝娌℃湁 20 涓湡瀹?exploit PoC銆?2. **澶氭暟搴旂敤绗﹀彿鏄湰鍦扮鍙?*锛欴SL 宸叉敮鎸?`offset`锛屼絾姣忎釜 app build 闇€瑕佺敓鎴?   offset 琛紱20 涓?DSL 鏂囦欢褰撳墠鍙啓 symbol銆?3. **action writes 鏈疄鐜?*锛氬奖鍝?93479銆?2945銆?256锛堝啓 engine 瀛楁锛夈€?4. **PHP/Brotli**锛氭湇鍔″櫒娌℃湁瀵瑰簲鐪熷疄浜岃繘鍒?閰嶇疆锛涢渶鍏堟瀯寤烘垨鎷疯礉銆?5. **httpd 闇€妯″潡**锛歚httpd` 浜岃繘鍒堕渶瑕?`mod_*.so` 涓?APR 鐜锛涗笖 httpd 澶氱嚎绋嬶紝
+   褰撳墠 DSL 鐨?Frida NativeCallback 鍙€傚悎鍗曠嚎绋嬶紙鍙敼 `ThreadsPerChild 1` 鍐嶆祴锛夈€?6. 鐜版湁 20 渚?DSL 鐨勨€滈獙璇佲€濇槸鍚堟垚 fixture + selector 娉ㄥ叆锛屼笉鏄湡瀹炲簲鐢紱
+   鏈褰曟槸鐪熷疄搴旂敤閲嶆斁鐨勭涓€姝ャ€?
+## 涓嬩竴姝?
+1. 涓烘瘡涓?app build 鐢熸垚 offset 琛紝鎵归噺鎶?20 涓?DSL 鐨?`浣嶇疆` 琛ユ垚 module+offset锛?2. 瀹炵幇 action writes锛坋ngine 瀛楁/鍔ㄤ綔鍓綔鐢級锛?3. 鏋勫缓/鎷疯礉 nginx/httpd/PHP/Brotli 鐪熷疄鐩爣锛屽啓 replay harness锛?   - 鍚姩搴旂敤 鈫?Frida 瀹夎 DSL 鈫?鍙戣姹?鎿嶄綔 鈫?姣旇緝 baseline/patched锛?4. 瀵规潯浠惰ˉ涓佹瀯閫犺Е鍙戣姹傦紙alias/uri_changed銆乺egex captures銆乥locked 闃堝€肩瓑锛夈€?
