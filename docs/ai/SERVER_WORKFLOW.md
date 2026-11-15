@@ -28,6 +28,19 @@ ssh qizhi-51 "cd /kyz/VulGate-v1 && git pull --ff-only origin main"
 
 （服务器 clone 使用 HTTPS 只读；提交与推送仍从本地执行。）
 
+### 未提交改动的快速同步（本地 → 服务器）
+
+修改后、提交前想先在服务器跑测试，可用：
+
+```powershell
+python tools/sync_to_qizhi51.py
+```
+
+脚本把本地工作树（排除 `.git/`、`build/`、`.venv/`、缓存目录）打包，经 `scp` 传到
+`qizhi-51:/tmp`，在 `/kyz/VulGate-v1` 解包；文本文件统一转成 LF，避免 Windows CRLF 把服务器
+git 工作区弄脏。它**不更新服务器 git HEAD**：验证通过后仍建议 commit + push，再在服务器
+`git pull --ff-only` 归一化。
+
 ## 构建 Frida 后端
 
 ```sh
