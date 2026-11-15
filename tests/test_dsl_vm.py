@@ -1,0 +1,50 @@
+﻿from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from runtime.dsl import parser, vm  # noqa: E402
+
+SAMPLE = '''
+action REJECT:
+{
+    return_type: int
+    return: -73
+}
+
+mount sample:
+{
+    location: symbol="target_fn", args=[pointer, uint64], return=int
+    nature: intercept
+    behavior:
+    {
+        value["length"] = vg_read_u32(arg0 + 8);
+        if (value["length"] > 10) {
+            return block("REJECT");
+        }
+    }
+}
+'''
+
+
+def test_compile_sample_to_vm() -> None:
+    patch = parser.parse(SAMPLE)
+    compiled = vm.compile_patch(patch, overrides={'length': 11})
+    assert compiled.mounts[0].code
+    assert len(compiled.mounts[0].code) % 8 == 0
+    # last two instructions are mov r0, (0|1); exit
+    assert compiled.mounts[0].code[-8] == 0x95
+
+
+def test_generated_patches_compile_with_overrides() -> None:
+    values = {'activated': 0, 'throws': 0, 'uploads': 0,
+              'alias': 1, 'flags': 32, 'previous': 1,
+              'captures': 1, 'counter': 250,
+              'remaining': 0, 'sample_present': 0}
+    for path in sorted((ROOT / 'runtime' / 'dsl' / 'patches').glob('*.vg')):
+        patch = parser.load(path)
+        compiled = vm.compile_patch(patch, overrides=values)
+        assert compiled.mounts
+        assert all(mount.code for mount in compiled.mounts)
+

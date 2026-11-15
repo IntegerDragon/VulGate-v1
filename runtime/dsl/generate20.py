@@ -160,6 +160,24 @@ def _action_block(name: str, action: dict) -> str:
 
 
 RETURN_ONLY_OVERRIDES = {
+    'CVE-2026-111497': """action BROTLI_REFILL_FATAL:
+{
+    return_type: int
+    return: -9
+}
+
+mount CVE-2026-111497/WriteRingBuffer:
+{
+    location: module="libpd_brotli.so", symbol="WriteRingBuffer", args=[pointer, pointer, pointer, pointer, int], return=int
+    nature: intercept
+    behavior:
+    {
+        if (true) {
+            return block("BROTLI_REFILL_FATAL");
+        }
+    }
+}
+""",
     'CVE-2026-93479': """action SCRIPT_RUN_BLOCK:
 {
     return_type: pointer

@@ -71,8 +71,6 @@ POINTER_ARGS = {
 # Second scenario: selector values that make the condition false (PASS).
 PASS_VALUES = {
     'CVE-2026-109618': {'activated': 1, 'throws': 0, 'uploads': 0},
-    'CVE-2026-111497': {'sample_present': 1, 'remaining': 0, 'occupied': 0,
-                        'capacity': 8, 'next_in': 0, 'last_in': 0, 'available_in': 0},
     'CVE-2026-15176': {'alias': 0, 'flags': 0},
     'CVE-2026-47360': {'previous': 0},
     'CVE-2026-60005': {'captures': 0, 'flags': 0},

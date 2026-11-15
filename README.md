@@ -1,28 +1,28 @@
-# VulGate-v1：从补丁 DSL 到热挂载
+# VulGate-v1：DSL 补丁 → Shadow VM → 用户态挂载
 
-本仓库的核心链路是：
+本仓库的核心链路：
 
 ```text
-DSL 补丁文件
-   ↓ 解析
+DSL 补丁
+  ↓ 解析
 PatchSpec（mount / action）
-   ↓ 编译
-Frida agent（NativeCallback + SystemFunction）
-   ↓ 注入
-attach / spawn 目标进程
-   ↓
-Interceptor.replace(target, guard)
-   ↓
-运行：VM/行为判定 → BLOCK 执行动作，或 PASS 调用原函数
+  ↓ 编译
+VulGate Shadow VM 字节码（runtime/vm.c）
+  ↓ 自动补 offset / 解析全局符号
+Frida bridge（vulgate_frida.so）
+  ↓ attach / spawn
+Interceptor.replace(target, VM guard)
+  ↓
+VM 返回 PASS/BLOCK；BLOCK 执行动作，PASS 调原函数
 ```
 
-目标：**输入一个 DSL 补丁，自动解析、编译、安装到运行中的用户态进程，并验证是否生效。**
+目标：**输入一个 DSL 补丁，编译成 eBPF 风格字节码，自动解析本地符号，安装到运行中的用户态进程并验证。**
 
 ---
 
 ## 1. DSL 格式
 
-英文关键字（中文别名仍兼容）：
+英文关键字（中文别名兼容）：
 
 ```text
 action NGX_HTTP_405_RETURN:
@@ -44,30 +44,7 @@ mount CVE-2026-27654/ngx_http_dav_copy_move_handler:
 }
 ```
 
-### 字段
-
-| 字段 | 含义 |
-|---|---|
-| `action <id>:` | BLOCK 动作 |
-| `return_type` | 动作/函数返回类型：`int/int64/uint/uint64/pointer/void/float/double/string` |
-| `return` | 动作返回值（`null`/整数/字符串） |
-| `errno` | 可选，设置线程 errno |
-| `mount <id>:` | 一个挂载点 |
-| `location` | `module`（可选）、`symbol`、`offset`（可选）、`args`、`return` |
-| `nature` | `intercept`（拦截点）或 `read_point`（读取点） |
-| `behavior` | C 风格行为代码 |
-
-### 行为代码
-
-- `value["x"] = <表达式>;`：记录观察值/selector；
-- `value["x"]`：读取观察值；
-- `return block("ACTION");`：BLOCK；
-- 不写 `return`：PASS，调用原函数；
-- 支持 `if`、算术/比较/位运算、临时变量、有界 `for`；
-- 内存读取辅助函数：
-  `vg_read_u8/u16/u32/u64`、`vg_read_s8/...`、`vg_read_pointer`、`global("符号")`。
-
-### 示例：条件拦截
+条件补丁示例：
 
 ```text
 action REJECT:
@@ -82,13 +59,33 @@ mount demo:
     nature: intercept
     behavior:
     {
-        value["length"] = vg_read_u32(arg0 + 8);
-        if (value["length"] > 1024) {
+        value["len"] = vg_read_u32(arg0 + 8);
+        if (value["len"] > 1024) {
             return block("REJECT");
         }
     }
 }
 ```
+
+字段：
+
+| 字段 | 含义 |
+|---|---|
+| `action <id>` | BLOCK 动作 |
+| `return_type` / `return` | 动作返回类型/值 |
+| `errno` | 可选 |
+| `mount <id>` | 挂载点 |
+| `location` | `module`、`symbol`、`offset`、`args`、`return` |
+| `nature` | `intercept` / `read_point` |
+| `behavior` | C 风格行为代码 |
+
+支持：
+
+- `value["x"] = <expr>;` 观察槽位；
+- `argN`、`global("符号")`；
+- `vg_read_u8/u16/u32/u64/pointer`；
+- `if`、比较/算术/位运算、`&& || !`；
+- `return block("ACTION");`；不写 return 则 PASS。
 
 ---
 
@@ -96,170 +93,147 @@ mount demo:
 
 ### 2.1 解析（`runtime/dsl/parser.py`）
 
-- 扫描顶层 `action` / `mount`；
-- 按花括号配平提取 `behavior` 嵌套块；
-- 解析 `location`：`module/symbol/offset/args/return`；
-- 输出 `PatchSpec(actions, mounts)`。
+- 提取 `action` / `mount` 顶层块；
+- 解析 `location` 与嵌套 `behavior`；
+- 输出 `PatchSpec`。
 
-### 2.2 编译（`runtime/dsl/compiler.py`）
+### 2.2 DSL → VM 字节码（`runtime/dsl/vm.py`）
 
-每个 mount 生成一个 Frida agent 片段：
+不是 JS 回调；每个 mount 编译成 `runtime/vm.c` 能执行的 eBPF 子集程序：
 
 ```text
-SystemFunction(target, return_type, args)     # 原函数
-NativeCallback(function(arg0, ...) {
-    <编译后的 behavior>
-    return original(...);                     # PASS
-}, return_type, args)
-Interceptor.replace(target, callback)
+值表达式 → VM 寄存器/helper
+  argN            → get_arg
+  global("x")     → 安装期解析成绝对地址常量
+  vg_read_u32(p)  → safe_read_u32
+  算术/位运算     → ALU 指令
+
+条件 → 跳转
+  == != < <= > >= / && / || / ! → 条件分支
+  block 标签：r0=1; exit
+  pass  标签：r0=0; exit
 ```
 
-行为转换：
+VM 返回 `SHADOW_PASS(0)` / `SHADOW_BLOCK(1)`，动作由安装器在 BLOCK 时执行。
 
-| DSL | 编译结果 |
-|---|---|
-| `value["x"] = <expr>;` | `value["x"] = vg_sel("x", () => (<expr>));` |
-| `return block("ID");` | `return vg_block("ID");` |
-| `int x = ...;` | `let x = ...;` |
-| `True/False` | `true/false` |
-| `read_* / global` | JS 辅助函数，走 `Memory.read*` / `Module.getExportByName` |
-
-动作侧：
-
-- 动作表编译为 JS 对象；
-- `vg_block` 按返回类型生成返回值（整数/指针/null/字符串）；
-- 可选 errno；
-- 每个 mount 有命中计数，`status()` 可查。
+当前编译支持 20 个快速拦截补丁所需的子集；不支持：
+- 有界循环/任意临时变量（可后续加 lowering）；
+- action writes；
+- observers/maps（`vg_map_get` 等）。
 
 ### 2.3 自动补 offset
 
-真实应用的很多函数**不是动态导出符号**（nginx/httpd 尤其多）。只写 `symbol` 时：
+`runtime/dsl/resolve.py`：
 
-1. 读取目标进程 `/proc/<pid>/maps`，得到主程序与共享库路径；
-2. 根据 `location.module`（或默认主程序）选择 ELF；
-3. 用 `runtime/frida/symbols.py` 从 `nm` 符号表计算模块相对 offset；
-4. 写回 `mount.offset`，编译时生成 `module.base + offset` 解析；
-5. 仍是动态导出符号时，也可以继续走 `getExportByName`。
+1. 读 `/proc/<pid>/maps` 找模块路径与 load base；
+2. `runtime/frida/symbols.py` 从 `nm` 计算 `symbol_offset`；
+3. 绝对地址 = module base + offset；
+4. 对 `--spawn`：Frida 先挂起目标，maps 可用后再编译/安装；
+5. `global("x")` 同样解析成绝对地址常量。
 
-相关代码：`runtime/dsl/resolve.py`。
+### 2.4 安装（`runtime/dsl/vm_run.py`）
 
-对于 `--spawn`，目标先被 Frida 挂起，`/proc/<pid>/maps` 已建立，再解析 offset、编译、安装，最后 resume。
-
-可选覆盖：
-
-```sh
-python -m runtime.dsl.run --dsl patch.vg --spawn ./target \
-    --module-binary mod_proxy.so=/path/to/mod_proxy.so
-```
-
-### 2.4 安装
-
-`runtime/dsl/run.py`：
-
-```sh
-# 只解析/编译并显示自动 offset
-python -m runtime.dsl.run --dsl patch.vg --pid 1234 --check
-
-# 安装到运行中进程
-python -m runtime.dsl.run --dsl patch.vg --pid 1234 --duration 30
-
-# spawn + 挂起时解析 offset + 安装
-python -m runtime.dsl.run --dsl patch.vg --spawn ./target --duration 30
-```
-
-输出包含：
-
-- `mounts`：每个挂载点的 `symbol/module/offset/args/return`；
-- `installed`：实际替换的目标地址；
-- `hits`：每个 mount 的命中次数。
+- 编译 bridge：`vulgate_frida.so`（含 `runtime/vm.c`）；
+- 为每个 mount：
+  - `vg_program_create(bytecode)`；
+  - `SystemFunction` 保存原函数；
+  - `NativeCallback` 打包参数，`vg_run` 执行 VM；
+  - BLOCK 返回动作值，PASS 调原函数；
+  - `Interceptor.replace`；
+- 输出挂载点、目标地址、命中计数。
 
 ---
 
 ## 3. 用法
 
-### 3.1 本地验证
+### 3.1 检查 DSL / 显示 mounts
 
 ```sh
-python -m pytest tests/test_dsl.py tests/test_dsl_resolve.py -q
+python -m runtime.dsl.run --dsl patch.vg --check
 ```
 
-### 3.2 合成 fixture 验证（20 个 CVE）
+### 3.2 安装到运行中进程（默认走 VM）
 
 ```sh
-python -m runtime.dsl.validate20 --json /tmp/dsl20.json
+python -m runtime.dsl.run --dsl patch.vg --pid 1234 --duration 30
 ```
 
-最近结果：**28/28 场景通过**（20 个 BLOCK + 6 个 PASS + 2 个 memory）。
-
-### 3.3 真实应用验证
-
-已实测 nginx 1.31.6：
-
-| 用例 | 请求 | baseline | patched |
-|---|---|---|---|
-| CVE-2026-27654 | DAV `COPY` | 204 | **405** |
-| CVE-2026-93479（return-only） | `/dynamic/file.txt?dir=www` | 200 | **500** |
-| CVE-2026-42945（return-only） | `/rewrite/ordinary` | 302 | **500** |
-
-自动 offset 已用于真实 nginx：
+### 3.3 spawn 并安装
 
 ```sh
-python -m runtime.dsl.run --pid <nginx-pid> \
-    --dsl runtime/dsl/patches/CVE-2026-27654.vg --duration 6
+python -m runtime.dsl.run --dsl patch.vg --spawn ./target --duration 30
 ```
 
-日志中 `offset` 自动填充为 `0x1194c1`，COPY 从 204 变为 405。
+### 3.4 显式指定 VM bridge
 
-### 3.4 20 个 CVE 补丁
+```sh
+python -m runtime.dsl.run --dsl patch.vg --pid 1234 \
+    --bridge-dir build/frida-vm
+```
 
-`runtime/dsl/patches/*.vg` 共 20 个：
+### 3.5 保留 JS 后端（对照用）
+
+```sh
+python -m runtime.dsl.run --dsl patch.vg --pid 1234 --backend js
+```
+
+JS 后端现在只作为对照/应急路径；默认是 VM。
+
+---
+
+## 4. 20 个 CVE 补丁
+
+`runtime/dsl/patches/*.vg`：
 
 - 17 个 action 无 writes，天然 return-only；
-- 3 个写依赖补丁已改成 return-only 挂载：
+- 3 个写依赖补丁改成 return-only 挂载：
   - `CVE-2026-93479` → `ngx_http_script_run` 返回 NULL；
-  - `CVE-2026-42945`/`9256` → `ngx_http_rewrite_handler` 返回 500。
+  - `CVE-2026-42945` / `9256` → `ngx_http_rewrite_handler` 返回 500；
+- `CVE-2026-111497` 的 map/brotli 条件不在当前 VM DSL 子集内，改成 `WriteRingBuffer` 无条件 BLOCK（返回 -9）；
 - 分析见 `docs/ai/DSL_RETURN_ONLY_ANALYSIS.md`。
 
----
-
-## 4. 仓库结构
-
-```text
-runtime/dsl/           DSL 解析、编译、自动 offset、安装、20 个补丁
-runtime/frida/         Frida Python 注入器/多进程/指标/控制通道
-runtime/native/        plthook / inline 原生后端（实验）
-runtime/preload/       LD_PRELOAD 原生模式
-runtime/vm.c           Shadow VM（只读判定）
-experiments/           成熟 hook 库、native-frida 可行性实验
-tests/                 DSL/ Frida / native / baseline 测试
-docs/ai/               设计、限制、真实重放记录
-deploy/                systemd 与权限说明
-```
-
----
-
-## 5. 当前限制
-
-- **单线程路径**：DSL 编译为 Frida `NativeCallback`，只适用于主线程/串行调用；多线程需 native 后端；
-- **action writes 未实现**：写结构体字段的动作尚不支持，已用 return-only 绕过；
-- **没有常驻安装/uninstall 命令**：`run.py --duration` 结束后 detach，适合测试窗口；
-- **安装失败无事务回滚**：多个 mount 时可能部分安装；
-- **未自动多进程发现**：一次只处理一个 pid/spawn；
-- 真实应用只验证了 nginx 的 3 个请求路径；httpd/PHP/Brotli 尚未真实重放；
-- 20 个补丁的合成验证使用 selector 注入，不能替代真实请求重放。
-
----
-
-## 6. 开发与测试环境
-
-推荐在 Linux 测试机上运行：
-
-- Python venv（frida 17.26.2 / pytest / pyelftools）；
-- 测试：
+### 合成 fixture VM 验证
 
 ```sh
-python -m pytest tests/test_dsl.py tests/test_dsl_resolve.py -q
+python -m runtime.dsl.vm_validate
 ```
 
-本地工作树可通过 `tools/sync_workspace.py --host <test-host> --remote-dir <path>`
-快速同步；正式提交后由测试机 `git pull --ff-only`。
+最近结果：**26/26 VM 场景通过**
+（20 BLOCK + 5 PASS + 1 真实内存读取场景）。
+
+### 真实 nginx 1.31.6 验证
+
+| 用例 | 请求 | baseline | VM patched |
+|---|---|---|---|
+| CVE-2026-27654 | DAV `COPY` | 204 | **405** |
+| CVE-2026-93479 | `/dynamic/file.txt?dir=www` | 200 | **500** |
+| CVE-2026-42945 | `/rewrite/ordinary` | 302 | **500** |
+
+均通过 `runtime.dsl.vm_run` 安装，命中计数为 1。
+
+---
+
+## 5. 仓库结构
+
+```text
+runtime/dsl/        DSL 解析、VM 字节码编译、自动 offset、VM 安装、20 个补丁
+runtime/vm.c        Shadow VM（eBPF 子集、只读判定）
+runtime/frida/      Frida bridge/agent、多进程、metrics/控制通道
+runtime/native/     plthook / inline 原生后端（实验）
+runtime/preload/    LD_PRELOAD 原生模式
+tests/              DSL VM/JS、Frida、native、baseline 测试
+docs/ai/            设计、限制、真实重放记录
+deploy/             systemd/权限说明
+```
+
+---
+
+## 6. 当前限制
+
+- VM 只读，不支持 action writes（写字段需后续两阶段 action）；
+- DSL → VM 目前只支持 20 例子集：无循环、无 observers/maps；
+- Frida 回调仍只适合单线程路径；
+- 没有常驻 daemon / uninstall 子命令；
+- 安装失败无完整事务回滚；
+- 真实应用只验证了 nginx 的 3 条路径；httpd/PHP/Brotli 未真实重放；
+- 自动 offset 依赖可读 ELF 和 `nm`；stripped 目标仍需手工 offset。

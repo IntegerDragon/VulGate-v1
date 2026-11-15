@@ -40,7 +40,25 @@ def main() -> int:
                         help='JSON map of selector test values (validation only)')
     parser.add_argument('--module-binary', action='append', default=[],
                         help='name=path override for a module (spawn/check-only)')
+    parser.add_argument('--backend', choices=['vm', 'js'], default='vm',
+                        help='execution engine: VulGate Shadow VM (default) or JS callbacks')
+    parser.add_argument('--bridge-dir', type=Path, default=ROOT / 'build' / 'frida-vm')
     args = parser.parse_args()
+
+    if args.backend == 'vm':
+        from runtime.dsl import vm_run
+        patch = dsl_parser.load(args.dsl)
+        if args.check:
+            print(json.dumps({'dsl': str(args.dsl), 'backend': 'vm',
+                              'mounts': [mount.__dict__ for mount in patch.mounts],
+                              'actions': {name: action.__dict__
+                                          for name, action in patch.actions.items()}},
+                             ensure_ascii=False))
+            return 0
+        result = vm_run.install(args.dsl, args.pid, args.spawn, args.bridge_dir,
+                                args.duration, spawn=args.spawn is not None)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
 
     patch = dsl_parser.load(args.dsl)
     overrides = _module_binaries(args.module_binary)

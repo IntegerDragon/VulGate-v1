@@ -122,3 +122,77 @@ def resolve_patch(patch: dsl_parser.PatchSpec, pid: int | None = None,
             if main is not None and Path(binary).resolve() == Path(main).resolve():
                 mount.module = None
     return patch
+
+
+def _map_lines(pid: int):
+    try:
+        lines = Path(f'/proc/{pid}/maps').read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return []
+    result = []
+    for line in lines:
+        fields = line.split(maxsplit=5)
+        if len(fields) < 6:
+            continue
+        try:
+            start = int(fields[0].split('-')[0], 16)
+        except ValueError:
+            continue
+        path = fields[5].strip()
+        if path.startswith('/'):
+            result.append((start, path))
+    return result
+
+
+def module_base(pid: int | None, module_name: str | None = None,
+                executable: Path | None = None) -> tuple[str, int, Path] | None:
+    """Return (module basename, load base, ELF path) for a target module."""
+    if pid is None:
+        if executable is None:
+            return None
+        path = Path(executable)
+        try:
+            bias = frida_symbols.load_bias(path) or 0
+        except OSError:
+            bias = 0
+        return (path.name, 0, path)
+    main = None
+    try:
+        main = Path(os.readlink(f'/proc/{pid}/exe'))
+    except OSError:
+        main = None
+    candidates = _map_lines(pid)
+    if module_name:
+        base_name = Path(module_name).name
+        for start, path in candidates:
+            if Path(path).name == base_name:
+                try:
+                    bias = frida_symbols.load_bias(Path(path)) or 0
+                except OSError:
+                    bias = 0
+                return (Path(path).name, start - bias, Path(path))
+    if main is not None:
+        for start, path in candidates:
+            if Path(path) == main or Path(path).name == main.name:
+                try:
+                    bias = frida_symbols.load_bias(main) or 0
+                except OSError:
+                    bias = 0
+                return (main.name, start - bias, main)
+    if candidates:
+        start, path = candidates[0]
+        return (Path(path).name, start, Path(path))
+    return None
+
+
+def resolve_global(name: str, pid: int | None, module_name: str | None,
+                   executable: Path | None = None, nm: str = 'nm') -> tuple[str, int]:
+    """Resolve a global symbol to (module basename, absolute address)."""
+    info = module_base(pid, module_name, executable)
+    if info is None:
+        raise ValueError('cannot find target module for global ' + name)
+    module, base, path = info
+    offset = _offset_for(path, name, nm)
+    if offset is None:
+        raise ValueError('global symbol not found: ' + name)
+    return (module, base + offset)
