@@ -46,7 +46,30 @@ SCALAR_ARGS = {
     'CVE-2026-93479': {'arg1': 1},
 }
 
-MEMORY_MODE = {'CVE-2026-93479'}
+MEMORY_MODE = {'CVE-2026-93479', 'CVE-2026-109618', 'CVE-2026-47360'}
+
+FIXTURE_DECLS = {
+    'CVE-2026-109618': '''
+__attribute__((used, visibility("default"))) unsigned char core_globals[1024];
+__attribute__((used, visibility("default"))) unsigned char sapi_globals[1024];
+''',
+    'CVE-2026-47360': '''
+static unsigned char request_rec_buffer[4096];
+''',
+}
+FIXTURE_SETUP = {
+    'CVE-2026-109618': '''
+    memset(core_globals, 0, sizeof(core_globals));
+    memset(sapi_globals, 0, sizeof(sapi_globals));
+''',
+    'CVE-2026-47360': '''
+    memset(request_rec_buffer, 0, sizeof(request_rec_buffer));
+    *(void **)(request_rec_buffer + 32) = (void *)1;
+''',
+}
+POINTER_ARGS = {
+    'CVE-2026-47360': {0: 'request_rec_buffer'},
+}
 
 # Second scenario: selector values that make the condition false (PASS).
 PASS_VALUES = {
@@ -84,7 +107,7 @@ def render_fixture(patch: dsl_parser.PatchSpec, case_id: str) -> str:
             key = f'arg{index}'
             value = SCALAR_ARGS.get(case_id, {}).get(key)
             if kind == 'pointer':
-                arguments.append('(void *)0')
+                arguments.append(POINTER_ARGS.get(case_id, {}).get(index, '(void *)0'))
             elif value is not None:
                 arguments.append(str(value))
             else:
@@ -95,12 +118,14 @@ def render_fixture(patch: dsl_parser.PatchSpec, case_id: str) -> str:
             main_calls.append('    results[result_count++] = -999999;')
         else:
             main_calls.append(f'    results[result_count++] = (long long){expression};')
+    extras = FIXTURE_DECLS.get(case_id, '')
+    setup = FIXTURE_SETUP.get(case_id, '')
     return f'''#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 static unsigned long long body_calls = 0;
-
+{extras}
 {chr(10).join(calls)}
 
 int main(void)
@@ -108,6 +133,7 @@ int main(void)
     char line[64];
     long long results[32];
     int result_count = 0;
+{setup}
     printf("{{\\"ready\\":true}}\\n");
     fflush(stdout);
     if (fgets(line, sizeof(line), stdin) == NULL) {{

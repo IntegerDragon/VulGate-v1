@@ -204,7 +204,7 @@ Frida attach 路径限制（详见 `docs/ai/FRIDA_THREAD_SAFETY.md`）：
 - 20 个 CVE 的 DSL 位于 `runtime/dsl/patches/*.vg`，由 `runtime/dsl/generate20.py`
   从 `build/declarative20-specs` 生成；
 - 验证：`runtime/dsl/validate20.py` 用合成 fixture 验证 BLOCK/PASS/真实内存读取；
-  服务器实测 **28/28 场景通过**；
+  服务器实测 **30/30 场景通过**；
 - 限制：Frida 单线程路径、结构体返回/动作 writes/真实 callsite 未接入，详见
   `runtime/dsl/README.md`。
 
