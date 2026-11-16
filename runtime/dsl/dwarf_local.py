@@ -132,7 +132,10 @@ def _type_size(dwarf, die, depth: int = 0) -> int:
     attr = die.attributes.get('DW_AT_type')
     if attr is None:
         return 8
-    target = dwarf.get_DIE_from_refaddr(attr.value)
+    try:
+        target = die.cu.get_DIE_from_refaddr(attr.value)
+    except Exception:
+        return 8
     if target is None:
         return 8
     if target.tag == 'DW_TAG_pointer_type':
@@ -159,7 +162,7 @@ def resolve_local(binary: Path, caller: str, variable: str,
                 if die.tag != 'DW_TAG_subprogram' or _die_name(die) != caller:
                     continue
                 for child in die.iter_children():
-                    if child.tag != 'DW_TAG_variable' or _die_name(child) != variable:
+                    if child.tag not in ('DW_TAG_variable', 'DW_TAG_formal_parameter') or _die_name(child) != variable:
                         continue
                     location = child.attributes.get('DW_AT_location')
                     if location is None:
