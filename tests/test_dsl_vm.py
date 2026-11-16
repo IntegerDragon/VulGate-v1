@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,4 +47,18 @@ def test_generated_patches_compile_with_overrides() -> None:
         compiled = vm.compile_patch(patch, overrides=values)
         assert compiled.mounts
         assert all(mount.code for mount in compiled.mounts)
+
+
+def test_map_observer_compiles() -> None:
+    path = ROOT / 'tests' / 'workloads' / 'dsl' / 'map_demo.vg'
+    patch = parser.load(path)
+    compiled = vm.compile_patch(patch, {})
+    assert [mount.nature for mount in compiled.mounts] == ['read_point', 'intercept']
+    assert compiled.maps and compiled.maps[0]['id'] == 'limits'
+    assert compiled.maps[0]['keys'] == {
+        '0': 'max_upload',
+        '1': 'very_long_variable_name_for_map_key',
+    }
+    assert compiled.mounts[0].action_id is None
+    assert compiled.mounts[1].action_id == 'REJECT'
 

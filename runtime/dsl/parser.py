@@ -34,6 +34,12 @@ from pathlib import Path
 
 
 @dataclass
+class MapSpec:
+    id: str
+    capacity: int = 1024
+
+
+@dataclass
 class ActionSpec:
     id: str
     return_type: str = 'int'
@@ -58,6 +64,7 @@ class MountSpec:
 class PatchSpec:
     actions: dict[str, ActionSpec]
     mounts: list[MountSpec]
+    maps: dict[str, MapSpec] = field(default_factory=dict)
 
 
 class DSLParseError(ValueError):
@@ -221,9 +228,10 @@ def _parse_action(identifier: str, body: str) -> ActionSpec:
 def parse(text: str) -> PatchSpec:
     text = _strip_comments(text)
     actions: dict[str, ActionSpec] = {}
+    maps: dict[str, MapSpec] = {}
     mounts: list[MountSpec] = []
     cursor = 0
-    pattern = re.compile(r'^(动作|挂载点|action|mount)\s+([^\s:：]+)\s*[:：]\s*', re.M)
+    pattern = re.compile(r'^(动作|挂载点|action|mount|map)\s+([^\s:：]+)\s*[:：]\s*', re.M)
     while True:
         match = pattern.search(text, cursor)
         if not match:
@@ -232,6 +240,11 @@ def parse(text: str) -> PatchSpec:
         block, cursor = _find_block(text, match.end())
         if kind in ('动作', 'action'):
             actions[identifier] = _parse_action(identifier, block)
+            continue
+        if kind == 'map':
+            fields = _split_fields(block)
+            capacity = int(fields.get('capacity', fields.get('容量', '1024')), 0)
+            maps[identifier] = MapSpec(identifier, capacity)
             continue
         fields = _split_fields(block)
         location = fields.get('位置', fields.get('location'))
@@ -255,7 +268,7 @@ def parse(text: str) -> PatchSpec:
         mounts.append(MountSpec(identifier, module, symbol, args, return_type, nature, behavior, offset))
     if not mounts:
         raise DSLParseError('DSL has no 挂载点')
-    return PatchSpec(actions, mounts)
+    return PatchSpec(actions, mounts, maps)
 
 
 def load(path: Path | str) -> PatchSpec:

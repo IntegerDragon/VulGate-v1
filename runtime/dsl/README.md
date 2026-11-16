@@ -41,13 +41,41 @@ python -m runtime.dsl.run --dsl patch.vg --pid 1234 --backend js
 - 比较/逻辑/算术 → 条件跳转/ALU；
 - BLOCK 后由安装器执行 action 返回值，PASS 调原函数。
 
+## 程序级 map / observer
+
+```text
+map limits:
+{
+    capacity: 16
+}
+
+mount observe_limit:
+{
+    location: symbol="observe_limit", args=[uint64, uint64], return=void
+    nature: read_point
+    behavior:
+    {
+        map["limits"]["max_upload"] = arg1;
+    }
+}
+```
+
+- `read_point` 用 `Interceptor.attach` 安装，只写 map，继续原函数；
+- 拦截点用 `map["limits"]["key"]` 读取，值进入 guard 条件；
+- map 由 `vg_map_pool_create` 创建，observer/guard 共享；
+- 字符串 key 在编译期映射为 per-map 的 `u64` key id；
+- VM helper：`MAP_SET(9)` / `MAP_GET(10)` / `MAP_PRESENT(11)` / `MAP_DELETE(12)`。
+
 ## 验证
 
 ```sh
 python -m runtime.dsl.vm_validate
+python -m runtime.dsl.vm_map_validate
 ```
 
 服务器最近结果：**26/26 VM 场景通过**（20 BLOCK + 5 PASS + 1 memory）。
+`vm_map_validate` 用户态 fixture：observer 写入 100，101 被 BLOCK、50 PASS，
+`blocked=-73, passed=0, body_calls=1`。
 
 真实 nginx 1.31.6：
 
@@ -58,6 +86,7 @@ python -m runtime.dsl.vm_validate
 ## 限制
 
 - VM 只读，action writes 未实现；
-- DSL→VM 目前支持 20 例子集：无循环、无 observers/maps；
+- DSL→VM 目前支持 20 例子集：无循环、无 callsite observer；
+- map 只支持编译期字面量 key；
 - Frida 回调仍只适合单线程；
 - 自动 offset 依赖可读 ELF + `nm`。

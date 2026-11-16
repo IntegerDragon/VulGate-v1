@@ -1,4 +1,4 @@
-﻿#ifndef _GNU_SOURCE
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include "autoshield.h"
@@ -142,9 +142,48 @@ VG_EXPORT void vg_set_replay_reads(const vg_read_entry *entries, unsigned count)
     vg_replay_total = count;
 }
 
-VG_EXPORT int vg_run(const vg_program *handle, const shadow_u64 *args,
-                     const shadow_u64 *observations, unsigned step_limit,
-                     shadow_stats *stats)
+VG_EXPORT unsigned vg_shadow_map_size(void) { return (unsigned)sizeof(shadow_map); }
+
+VG_EXPORT shadow_map *vg_map_pool_create(unsigned count, unsigned capacity)
+{
+    shadow_map *maps;
+    if (!count || count > SHADOW_MAX_MAPS || !capacity) return NULL;
+    maps = calloc(count, sizeof(shadow_map));
+    if (!maps) return NULL;
+    for (unsigned index = 0; index < count; index++) {
+        shadow_map_entry *entries = calloc(capacity, sizeof(shadow_map_entry));
+        if (!entries) {
+            for (unsigned previous = 0; previous < index; previous++) {
+                free(maps[previous].entries);
+            }
+            free(maps);
+            return NULL;
+        }
+        shadow_map_init(&maps[index], entries, capacity);
+    }
+    return maps;
+}
+
+VG_EXPORT void vg_map_pool_destroy(shadow_map *maps, unsigned count)
+{
+    if (!maps) return;
+    for (unsigned index = 0; index < count; index++) {
+        free(maps[index].entries);
+    }
+    free(maps);
+}
+
+VG_EXPORT int vg_map_pool_get(shadow_map *maps, unsigned index, shadow_u64 key,
+                              shadow_u64 *out)
+{
+    if (!maps || !out) return -1;
+    return shadow_map_get(&maps[index], key, out);
+}
+
+VG_EXPORT int vg_run_with_maps(const vg_program *handle, const shadow_u64 *args,
+                               const shadow_u64 *observations, unsigned step_limit,
+                               shadow_map *maps, unsigned map_count,
+                               shadow_stats *stats)
 {
     shadow_ctx ctx;
     shadow_policy policy;
@@ -157,8 +196,17 @@ VG_EXPORT int vg_run(const vg_program *handle, const shadow_u64 *args,
     shadow_policy_init(&policy);
     memcpy(ctx.args, args, sizeof(ctx.args));
     memcpy(ctx.regs, observations, sizeof(ctx.regs));
+    ctx.maps = maps;
+    ctx.map_count = map_count;
     policy.step_limit = step_limit;
     return run_ebpf_vm(&ctx, &handle->program, &policy, stats);
+}
+
+VG_EXPORT int vg_run(const vg_program *handle, const shadow_u64 *args,
+                     const shadow_u64 *observations, unsigned step_limit,
+                     shadow_stats *stats)
+{
+    return vg_run_with_maps(handle, args, observations, step_limit, NULL, 0, stats);
 }
 
 static int raw_safe_read(void *dst, const void *src, size_t len)

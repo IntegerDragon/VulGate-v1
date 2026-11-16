@@ -60,23 +60,45 @@ def _action_value(action: dsl_parser.ActionSpec) -> str:
 def _script(patch: dsl_parser.PatchSpec, compiled: dsl_vm.VMPatch,
             targets: list[tuple[int, str | None]], bridge: Path) -> str:
     entries = []
-    for mount, target, module in zip(compiled.mounts, targets, [m.module for m in patch.mounts]):
-        action = patch.actions[mount.action_id]
+    for mount, target in zip(compiled.mounts, targets):
+        if mount.action_id is None:
+            action_expr = 'undefined'
+        else:
+            action_expr = _action_value(patch.actions[mount.action_id])
         entries.append(
-            '{id: %s, args: %s, return_type: %s, target: %s, code: %s, action: %s}' % (
+            '{id: %s, args: %s, return_type: %s, target: %s, code: %s, '
+            'action: %s, nature: %s}' % (
                 json.dumps(mount.id), json.dumps(mount.args),
                 json.dumps(mount.return_type), json.dumps(hex(target[0])),
-                json.dumps(list(mount.code)), _action_value(action)))
+                json.dumps(list(mount.code)), action_expr,
+                json.dumps(mount.nature)))
     mounts_literal = '[' + ', '.join(entries) + ']'
+    capacities = [int(item['capacity']) for item in compiled.maps]
+    map_literal = json.dumps({'count': len(capacities),
+                              'capacity': max(capacities) if capacities else 0})
     return r'''
 'use strict';
 const bridge = Module.load(%s);
 const create = new NativeFunction(bridge.getExportByName('vg_program_create'), 'pointer', ['pointer', 'uint']);
-const destroy = new NativeFunction(bridge.getExportByName('vg_program_destroy'), 'void', ['pointer']);
-const run = new NativeFunction(bridge.getExportByName('vg_run'), 'int', ['pointer', 'pointer', 'pointer', 'uint', 'pointer']);
+const run = new NativeFunction(bridge.getExportByName('vg_run_with_maps'), 'int',
+    ['pointer', 'pointer', 'pointer', 'uint', 'pointer', 'uint', 'pointer']);
+const mapCreate = new NativeFunction(bridge.getExportByName('vg_map_pool_create'), 'pointer', ['uint', 'uint']);
+const mapGet = new NativeFunction(bridge.getExportByName('vg_map_pool_get'), 'int', ['pointer', 'uint', 'uint64', 'pointer']);
+const VG_MAP_INFO = %s;
+const VG_MAP_POOL = VG_MAP_INFO.count ? mapCreate(VG_MAP_INFO.count, VG_MAP_INFO.capacity) : ptr(0);
 const VG_MOUNTS = %s;
 const VG_STATE = [];
 const VG_HITS = {};
+const VG_RUN = {};
+
+function vg_fill(target, values, count) {
+  const length = count === undefined ? values.length : count;
+  for (let index = 0; index < length; index++) {
+    const value = values[index];
+    if (value instanceof NativePointer) target.add(index * 8).writePointer(value);
+    else target.add(index * 8).writeU64(value);
+  }
+}
 
 function vg_install() {
   for (const spec of VG_MOUNTS) {
@@ -87,31 +109,55 @@ function vg_install() {
     const args = Memory.alloc(6 * 8);
     const regs = Memory.alloc(16 * 8);
     const stats = Memory.alloc(64);
+    if (spec.nature === 'read_point') {
+      Interceptor.attach(ptr(spec.target), {
+        onEnter: function(callArgs) {
+          VG_HITS[spec.id] = (VG_HITS[spec.id] || 0) + 1;
+          try {
+            vg_fill(args, callArgs, spec.args.length);
+          } catch (error) {
+            VG_RUN[spec.id] = 'fill-error: ' + error;
+            return;
+          }
+          try {
+            VG_RUN[spec.id] = run(handle, args, regs, 4096, VG_MAP_POOL, VG_MAP_INFO.count, stats);
+          } catch (error) {
+            VG_RUN[spec.id] = 'run-error: ' + error;
+          }
+        },
+      });
+      VG_STATE.push({id: spec.id, target: String(spec.target), handle: handle,
+                     nature: spec.nature, program: code});
+      continue;
+    }
     const original = new SystemFunction(ptr(spec.target), spec.return_type, spec.args);
     const callback = new NativeCallback(function() {
       VG_HITS[spec.id] = (VG_HITS[spec.id] || 0) + 1;
       const values = Array.prototype.slice.call(arguments);
-      for (let index = 0; index < values.length; index++) {
-        const value = values[index];
-        if (value instanceof NativePointer) args.add(index * 8).writePointer(value);
-        else args.add(index * 8).writeU64(value);
-      }
-      const decision = run(handle, args, regs, 4096, stats);
+      vg_fill(args, values);
+      const decision = run(handle, args, regs, 4096, VG_MAP_POOL, VG_MAP_INFO.count, stats);
+      VG_RUN[spec.id] = decision;
       if (decision === 1) return spec.action;
       return original.apply(null, values);
     }, spec.return_type, spec.args);
     Interceptor.replace(ptr(spec.target), callback);
     VG_STATE.push({id: spec.id, target: String(spec.target), handle: handle,
-                   callback: callback, program: code});
+                   callback: callback, nature: spec.nature, program: code});
   }
   Interceptor.flush();
 }
 
 rpc.exports = {
-  install: () => { vg_install(); return {installed: VG_STATE.map((s) => ({id: s.id, target: s.target})), hits: VG_HITS}; },
-  status: () => ({installed: VG_STATE.map((s) => ({id: s.id, target: s.target})), hits: VG_HITS}),
+  mapInfo: () => ({pool: String(VG_MAP_POOL), count: VG_MAP_INFO.count, capacity: VG_MAP_INFO.capacity, capacity_field: VG_MAP_POOL.readU32(), used: VG_MAP_POOL.add(4).readU32()}),
+  mapGet: (index, key) => {
+    const out = Memory.alloc(8);
+    const rc = mapGet(VG_MAP_POOL, index, key, out);
+    return {rc: rc, value: out.readU64().toString()};
+  },
+  install: () => { vg_install(); return {installed: VG_STATE.map((s) => ({id: s.id, target: s.target, nature: s.nature})), hits: VG_HITS}; },
+  status: () => ({installed: VG_STATE.map((s) => ({id: s.id, target: s.target, nature: s.nature})), hits: VG_HITS, run: VG_RUN}),
 };
-''' % (json.dumps(str(bridge)), mounts_literal)
+''' % (json.dumps(str(bridge)), map_literal, mounts_literal)
 
 
 def install(patch_path: Path, pid: int | None, executable: Path | None,
@@ -174,3 +220,8 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
+
+
+
+

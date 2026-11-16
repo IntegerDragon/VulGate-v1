@@ -40,6 +40,30 @@ typedef int64_t shadow_s64;
 #define SHADOW_HELPER_SAFE_READ_U64 6
 #define SHADOW_HELPER_SCRATCH_LOAD 7
 #define SHADOW_HELPER_SCRATCH_STORE 8
+#define SHADOW_HELPER_MAP_SET 9
+#define SHADOW_HELPER_MAP_GET 10
+#define SHADOW_HELPER_MAP_PRESENT 11
+#define SHADOW_HELPER_MAP_DELETE 12
+
+#define SHADOW_MAX_MAPS 8
+
+typedef struct shadow_map_entry {
+    shadow_u64 key;
+    shadow_u64 value;
+    shadow_u8 used;
+} shadow_map_entry;
+
+typedef struct shadow_map {
+    shadow_u32 capacity;
+    shadow_u32 count;
+    shadow_map_entry *entries;
+} shadow_map;
+
+int shadow_map_init(shadow_map *map, shadow_map_entry *entries, shadow_u32 capacity);
+int shadow_map_get(const shadow_map *map, shadow_u64 key, shadow_u64 *value);
+int shadow_map_set(shadow_map *map, shadow_u64 key, shadow_u64 value);
+int shadow_map_present(const shadow_map *map, shadow_u64 key);
+int shadow_map_delete(shadow_map *map, shadow_u64 key);
 
 typedef enum shadow_decision {
     SHADOW_PASS = 0,
@@ -77,6 +101,8 @@ typedef struct shadow_policy_config {
 typedef struct shadow_ctx {
     shadow_u64 args[SHADOW_MAX_ARGS];
     shadow_u64 regs[SHADOW_MAX_REGS];
+    shadow_map *maps;
+    shadow_u32 map_count;
 } shadow_ctx;
 
 typedef struct shadow_policy {

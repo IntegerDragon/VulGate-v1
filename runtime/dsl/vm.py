@@ -1,4 +1,4 @@
-"""Compile the patch DSL to VulGate Shadow-VM bytecode.
+﻿"""Compile the patch DSL to VulGate Shadow-VM bytecode.
 
 The DSL behavior accepted here is the subset used by the 20 quick-block
 patches: selector assignments (`value["x"] = ...;`) followed by one
@@ -39,6 +39,8 @@ HELPER_GET_REG = 3
 HELPER_READ_U16 = 4
 HELPER_READ_U32 = 5
 HELPER_READ_U64 = 6
+HELPER_MAP_SET = 9
+HELPER_MAP_GET = 10
 
 READ_HELPERS = {
     'vg_read_u8': HELPER_READ_U8,
@@ -148,6 +150,14 @@ class Parser:
                 _, name = self.take()
                 self.take(']')
                 return ('sel', name.strip('"'))
+            if value == 'map':
+                self.take('[')
+                _, map_name = self.take()
+                self.take(']')
+                self.take('[')
+                _, key = self.take()
+                self.take(']')
+                return ('mapget', map_name.strip('"'), key.strip('"'))
             if re.fullmatch(r'arg\d+', value):
                 return ('arg', int(value[3:]))
             raise ExprError('unknown name: ' + value)
@@ -210,10 +220,11 @@ class Assembler:
 
 class Compiler:
     def __init__(self, selectors: dict[str, object], globals_: dict[str, int],
-                 overrides: dict[str, int] | None = None):
+                 overrides: dict[str, int] | None = None, map_state=None):
         self.selectors = selectors
         self.globals = globals_
         self.overrides = overrides or {}
+        self.map_state = map_state
         self.asm = Assembler()
 
     def value(self, node, dst: int = 6) -> None:
@@ -235,6 +246,15 @@ class Compiler:
             if node[1] not in self.globals:
                 raise ExprError('global address not resolved: ' + node[1])
             self.asm.const(dst, self.globals[node[1]])
+        elif kind == 'mapget':
+            if self.map_state is None:
+                raise ExprError('map used without a map declaration')
+            map_id = self.map_state.map_id(node[1])
+            key_id = self.map_state.key_id(node[1], node[2])
+            self.asm.emit(OP_MOV_K64, 1, imm=map_id)
+            self.asm.emit(OP_MOV_K64, 2, imm=key_id)
+            self.asm.emit(OP_CALL, imm=HELPER_MAP_GET)
+            self.asm.emit(OP_MOV_X64, dst, 0)
         elif kind == 'read':
             self.value(node[2], 1)
             self.asm.emit(OP_CALL, imm=READ_HELPERS[node[1]])
@@ -317,6 +337,16 @@ class Compiler:
         self.asm.emit(OP_JNE_X, 6, 7, target=yes)
         self.asm.jump(no)
 
+    def map_set(self, map_name: str, key: str, value_node) -> None:
+        if self.map_state is None:
+            raise ExprError('map used without a map declaration')
+        map_id = self.map_state.map_id(map_name)
+        key_id = self.map_state.key_id(map_name, key)
+        self.value(value_node, 3)
+        self.asm.emit(OP_MOV_K64, 1, imm=map_id)
+        self.asm.emit(OP_MOV_K64, 2, imm=key_id)
+        self.asm.emit(OP_CALL, imm=HELPER_MAP_SET)
+
     def compile(self, condition) -> bytes:
         block = self.asm.label('block')
         passed = self.asm.label('pass')
@@ -339,13 +369,40 @@ class VMMount:
     args: list[str]
     return_type: str
     code: bytes
-    action_id: str
+    action_id: str | None
+    nature: str = 'intercept'
 
 
 @dataclass
 class VMPatch:
     mounts: list[VMMount]
     globals_: dict[str, int]
+    maps: list[dict]
+
+
+class MapState:
+    def __init__(self, declarations: dict):
+        self.order: list[str] = list(declarations)
+        self.ids = {name: index for index, name in enumerate(self.order)}
+        self.decls = declarations
+        self.keys: dict[str, dict[str, int]] = {name: {} for name in self.order}
+
+    def map_id(self, name: str) -> int:
+        if name not in self.ids:
+            raise ExprError('unknown map: ' + name)
+        return self.ids[name]
+
+    def key_id(self, map_name: str, key: str) -> int:
+        table = self.keys[map_name]
+        if key not in table:
+            table[key] = len(table)
+        return table[key]
+
+    def export(self) -> list[dict]:
+        return [{'id': name, 'capacity': int(self.decls[name].capacity),
+                 'keys': {str(value): key for key, value in sorted(self.keys[name].items(),
+                                                                   key=lambda item: item[1])}}
+                for name in self.order]
 
 
 def _extract(body: str) -> tuple[dict[str, str], str, str]:
@@ -362,23 +419,52 @@ def _extract(body: str) -> tuple[dict[str, str], str, str]:
     return selectors, match.group(1), match.group(2)
 
 
+def _extract_observer(body: str) -> list[tuple[str, str, str]]:
+    assignments = []
+    for line in body.splitlines():
+        match = re.match(
+            r'\s*map\["([^"]+)"\]\["([^"]+)"\]\s*=\s*(.+?);\s*$', line)
+        if match:
+            assignments.append((match.group(1), match.group(2), match.group(3)))
+    if not assignments:
+        raise ExprError('read_point behavior needs map["name"]["key"] = ...;')
+    return assignments
+
+
 def compile_patch(patch: dsl_parser.PatchSpec,
                   global_addresses: dict[str, int] | None = None,
                   overrides: dict[str, int] | None = None) -> VMPatch:
     global_addresses = global_addresses or {}
+    state = MapState(patch.maps)
     mounts: list[VMMount] = []
     for mount in patch.mounts:
+        read_point = mount.nature in ('\u8bfb\u53d6\u70b9', 'read_point')
+        nature = 'read_point' if read_point else 'intercept'
+        if read_point:
+            assignments = _extract_observer(mount.body)
+            compiler = Compiler({}, global_addresses, overrides, state)
+            for map_name, key, expression in assignments:
+                compiler.map_set(map_name, key, Parser(expression).parse())
+            compiler.asm.emit(OP_MOV_K64, 0, imm=0)
+            compiler.asm.emit(OP_EXIT)
+            mounts.append(VMMount(mount.id, mount.module, mount.symbol, mount.offset,
+                                  list(mount.args), mount.return_type,
+                                  compiler.asm.finalize(), None, nature))
+            continue
         raw_selectors, condition_text, action_id = _extract(mount.body)
         selectors = {name: Parser(text).parse() for name, text in raw_selectors.items()}
         condition = Parser(condition_text).parse()
-        code = Compiler(selectors, global_addresses, overrides).compile(condition)
+        code = Compiler(selectors, global_addresses, overrides, state).compile(condition)
         mounts.append(VMMount(mount.id, mount.module, mount.symbol, mount.offset,
-                              list(mount.args), mount.return_type, code, action_id))
+                              list(mount.args), mount.return_type, code, action_id,
+                              nature))
         if action_id not in patch.actions:
             raise ExprError('unknown action: ' + action_id)
-    return VMPatch(mounts, dict(global_addresses))
+    return VMPatch(mounts, dict(global_addresses), state.export())
+
 
 
 def compile_text(text: str, global_addresses: dict[str, int] | None = None,
                  overrides: dict[str, int] | None = None) -> VMPatch:
     return compile_patch(dsl_parser.parse(text), global_addresses, overrides)
+

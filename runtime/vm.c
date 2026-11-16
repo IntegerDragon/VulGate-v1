@@ -165,6 +165,73 @@ static int opcode_allowed(shadow_u8 code)
     }
 }
 
+int shadow_map_init(shadow_map *map, shadow_map_entry *entries, shadow_u32 capacity)
+{
+    if (!map || !entries || capacity == 0) return -1;
+    for (shadow_u32 index = 0; index < capacity; index++) {
+        entries[index].key = 0;
+        entries[index].value = 0;
+        entries[index].used = 0;
+    }
+    map->capacity = capacity;
+    map->count = 0;
+    map->entries = entries;
+    return 0;
+}
+
+int shadow_map_get(const shadow_map *map, shadow_u64 key, shadow_u64 *value)
+{
+    if (!map || !map->entries || !value) return -1;
+    for (shadow_u32 index = 0; index < map->capacity; index++) {
+        if (map->entries[index].used && map->entries[index].key == key) {
+            *value = map->entries[index].value;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int shadow_map_set(shadow_map *map, shadow_u64 key, shadow_u64 value)
+{
+    if (!map || !map->entries) return -1;
+    for (shadow_u32 index = 0; index < map->capacity; index++) {
+        if (map->entries[index].used && map->entries[index].key == key) {
+            map->entries[index].value = value;
+            return 0;
+        }
+    }
+    for (shadow_u32 index = 0; index < map->capacity; index++) {
+        if (!map->entries[index].used) {
+            map->entries[index].used = 1;
+            map->entries[index].key = key;
+            map->entries[index].value = value;
+            map->count++;
+            return 0;
+        }
+    }
+    return -2;
+}
+
+int shadow_map_present(const shadow_map *map, shadow_u64 key)
+{
+    shadow_u64 value = 0;
+    return shadow_map_get(map, key, &value) == 0 ? 1 : 0;
+}
+
+int shadow_map_delete(shadow_map *map, shadow_u64 key)
+{
+    if (!map || !map->entries) return -1;
+    for (shadow_u32 index = 0; index < map->capacity; index++) {
+        if (map->entries[index].used && map->entries[index].key == key) {
+            map->entries[index].used = 0;
+            map->entries[index].value = 0;
+            if (map->count > 0) map->count--;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int helper_allowed(shadow_s32 helper_id)
 {
     return helper_id == SHADOW_HELPER_GET_ARG ||
@@ -174,7 +241,11 @@ static int helper_allowed(shadow_s32 helper_id)
            helper_id == SHADOW_HELPER_SAFE_READ_U32 ||
            helper_id == SHADOW_HELPER_SAFE_READ_U64 ||
            helper_id == SHADOW_HELPER_SCRATCH_LOAD ||
-           helper_id == SHADOW_HELPER_SCRATCH_STORE;
+           helper_id == SHADOW_HELPER_SCRATCH_STORE ||
+           helper_id == SHADOW_HELPER_MAP_SET ||
+           helper_id == SHADOW_HELPER_MAP_GET ||
+           helper_id == SHADOW_HELPER_MAP_PRESENT ||
+           helper_id == SHADOW_HELPER_MAP_DELETE;
 }
 
 static int validate_bounded_backedge(const shadow_program *program, size_t pc, size_t target)
@@ -518,6 +589,37 @@ static int run_helper(shadow_u64 helper_id,
         }
         scratch[regs[1]] = regs[2];
         regs[0] = 0;
+        return 0;
+    case SHADOW_HELPER_MAP_SET:
+        if (!ctx->maps || regs[1] >= ctx->map_count) {
+            regs[0] = (shadow_u64)-1;
+            return 0;
+        }
+        regs[0] = (shadow_u64)shadow_map_set(&ctx->maps[regs[1]], regs[2], regs[3]);
+        return 0;
+    case SHADOW_HELPER_MAP_GET: {
+        shadow_u64 value = 0;
+        if (!ctx->maps || regs[1] >= ctx->map_count ||
+            shadow_map_get(&ctx->maps[regs[1]], regs[2], &value) != 0) {
+            regs[0] = 0;
+            return 0;
+        }
+        regs[0] = value;
+        return 0;
+    }
+    case SHADOW_HELPER_MAP_PRESENT:
+        if (!ctx->maps || regs[1] >= ctx->map_count) {
+            regs[0] = 0;
+            return 0;
+        }
+        regs[0] = (shadow_u64)shadow_map_present(&ctx->maps[regs[1]], regs[2]);
+        return 0;
+    case SHADOW_HELPER_MAP_DELETE:
+        if (!ctx->maps || regs[1] >= ctx->map_count) {
+            regs[0] = (shadow_u64)-1;
+            return 0;
+        }
+        regs[0] = (shadow_u64)shadow_map_delete(&ctx->maps[regs[1]], regs[2]);
         return 0;
     default:
         regs[0] = SHADOW_VM_ERROR;
