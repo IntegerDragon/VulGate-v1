@@ -67,11 +67,11 @@ def _script(patch: dsl_parser.PatchSpec, compiled: dsl_vm.VMPatch,
             action_expr = _action_value(patch.actions[mount.action_id])
         entries.append(
             '{id: %s, args: %s, return_type: %s, target: %s, code: %s, '
-            'action: %s, nature: %s}' % (
+            'action: %s, nature: %s, locals: %s}' % (
                 json.dumps(mount.id), json.dumps(mount.args),
                 json.dumps(mount.return_type), json.dumps(hex(target[0])),
                 json.dumps(list(mount.code)), action_expr,
-                json.dumps(mount.nature)))
+                json.dumps(mount.nature), json.dumps(mount.locals)))
     mounts_literal = '[' + ', '.join(entries) + ']'
     capacities = [int(item['capacity']) for item in compiled.maps]
     map_literal = json.dumps({'count': len(capacities),
@@ -100,6 +100,37 @@ function vg_fill(target, values, count) {
   }
 }
 
+function vg_read_mem(address, size) {
+  if (size === 1) return Memory.readU8(address);
+  if (size === 2) return Memory.readU16(address);
+  if (size === 4) return Memory.readU32(address);
+  return Memory.readU64(address);
+}
+
+function vg_local(recipe, context) {
+  if (recipe.kind === 'constant') return recipe.value;
+  if (recipe.kind === 'register') {
+    return context[recipe.reg];
+  }
+  if (recipe.kind !== 'memory') {
+    throw new Error('unknown local recipe: ' + recipe.kind);
+  }
+  let base = context[recipe.base];
+  if (base === undefined || base === null) {
+    throw new Error('missing register for local: ' + recipe.base);
+  }
+  let address = ptr(base).add(recipe.offset);
+  for (let index = 0; index < (recipe.deref || 0); index++) {
+    address = Memory.readPointer(address);
+  }
+  return vg_read_mem(address, recipe.size || 8);
+}
+
+function vg_store_local(target, slot, value) {
+  if (value instanceof NativePointer) target.add(slot * 8).writePointer(value);
+  else target.add(slot * 8).writeU64(value);
+}
+
 function vg_install() {
   for (const spec of VG_MOUNTS) {
     const code = Memory.alloc(spec.code.length);
@@ -114,6 +145,10 @@ function vg_install() {
         onEnter: function(callArgs) {
           VG_HITS[spec.id] = (VG_HITS[spec.id] || 0) + 1;
           try {
+            for (const localSpec of (spec.locals || [])) {
+              vg_store_local(regs, localSpec.slot,
+                             vg_local(localSpec.recipe, this.context));
+            }
             vg_fill(args, callArgs, spec.args.length);
           } catch (error) {
             VG_RUN[spec.id] = 'fill-error: ' + error;

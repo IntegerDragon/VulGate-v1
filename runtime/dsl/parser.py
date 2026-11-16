@@ -63,6 +63,7 @@ class MountSpec:
     callee: str | None = None
     file: str | None = None
     line: int | None = None
+    local_recipes: dict = field(default_factory=dict)
 
 
 @dataclass

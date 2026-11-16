@@ -15,7 +15,7 @@ mount observe_callsite:
     nature: read_point
     behavior:
     {
-        map["limits"]["available_in"] = arg1;
+        map["limits"]["available_in"] = local("available_in");
     }
 }
 

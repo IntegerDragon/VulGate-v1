@@ -64,7 +64,11 @@ mount observe_limit:
 - 拦截点用 `map["limits"]["key"]` 读取，值进入 guard 条件；
 - map 由 `vg_map_pool_create` 创建，observer/guard 共享；
 - 字符串 key 在编译期映射为 per-map 的 `u64` key id；
-- VM helper：`MAP_SET(9)` / `MAP_GET(10)` / `MAP_PRESENT(11)` / `MAP_DELETE(12)`。
+- VM helper：`MAP_SET(9)` / `MAP_GET(10)` / `MAP_PRESENT(11)` / `MAP_DELETE(12)`；
+- 动态 u64 key：`map["limits"][arg0]`；
+- `map_present("limits", arg0)`：只判断存在；
+- `map_take("limits", arg0)`：读取后删除（consume）；
+- `local("available_in")`：按 DWARF location 读取 caller 局部变量。
 
 ## 位置解析（x86-64）
 
@@ -98,11 +102,18 @@ callee guard BLOCK，fixture `body_calls=0`。
 ```sh
 python -m runtime.dsl.vm_validate
 python -m runtime.dsl.vm_map_validate
+python -m runtime.dsl.vm_callsite_validate
+python -m runtime.dsl.vm_brotli_validate
 ```
 
-服务器最近结果：**26/26 VM 场景通过**（20 BLOCK + 5 PASS + 1 memory）。
-`vm_map_validate` 用户态 fixture：observer 写入 100，101 被 BLOCK、50 PASS，
-`blocked=-73, passed=0, body_calls=1`。
+服务器最近结果：
+
+- `vm_validate`：**25/25**（111497 单独验证）；
+- `vm_map_validate`：动态 key + consume，第一次 BLOCK、第二次 PASS，
+  `body_calls=1`；
+- `vm_callsite_validate`：callsite + `local("available_in")`，`body_calls=0`；
+- `vm_brotli_validate`：原始 111497 DSL（callsite + local + 动态 key +
+  present/take），`body_calls=0`。
 
 真实 nginx 1.31.6：
 
@@ -115,6 +126,8 @@ python -m runtime.dsl.vm_map_validate
 - VM 只读，action writes 未实现；
 - DSL→VM 目前支持 20 例子集：无循环；callsite 仅解析直接 call；
 - 位置解析只适配 x86-64 Linux；
-- map 只支持编译期字面量 key；
+- map 支持字面量/动态 u64 key；运行时字符串 key 未支持；
+- map 仍是程序级全局，没有 thread-scoped；
+- caller local 仅支持 DWARF exprloc（reg/breg/fbreg/const/deref）；loclist 未实现；
 - Frida 回调仍只适合单线程；
 - 自动 offset 依赖可读 ELF + `nm`。

@@ -156,8 +156,24 @@ if (arg1 > value["limit"]) {
 - map 由安装器创建为程序级对象（`vg_map_pool_create`），所有 observer/guard 共享；
 - observer/guard 都通过 `vg_run_with_maps` 执行 VM；
 - map helper：`MAP_SET` / `MAP_GET` / `MAP_PRESENT` / `MAP_DELETE`；
-- DSL 的字符串 key 在编译期映射为 per-map 的 `u64` key id，VM 只处理整数 key；
-- 支持固定长度任意字符串 key（编译期 interning），不依赖运行时字符串比较。
+- 字符串 key 在编译期映射为 per-map 的 `u64` key id；也支持动态 u64 key：
+
+```text
+map["current_input"][arg0] = arg1;
+value["available_in"] = map_take("current_input", arg0);
+value["present"] = map_present("current_input", arg0);
+```
+
+- `map_take` = 读取后删除（consume）；`map_present` = 只判断 key 是否存在；
+- `local("available_in")` 从 caller 局部变量读取：
+
+```text
+map["current_input"][arg0] = local("available_in");
+```
+
+- 局部变量通过 DWARF `DW_AT_location`（`DW_OP_fbreg` / `DW_OP_reg` / `DW_OP_breg`）
+  在安装时解析，callsite 触发时从 Frida 寄存器/栈读取；
+- 支持 callsite/line 位置解析，不需要显式 offset。
 
 当前编译支持 20 个快速拦截补丁所需的子集；不支持：
 - 有界循环/任意临时变量（可后续加 lowering）；
@@ -269,7 +285,8 @@ JS 后端现在只作为对照/应急路径；默认是 VM。
 - 3 个写依赖补丁改成 return-only 挂载：
   - `CVE-2026-93479` → `ngx_http_script_run` 返回 NULL；
   - `CVE-2026-42945` / `9256` → `ngx_http_rewrite_handler` 返回 500；
-- `CVE-2026-111497` 的 map/brotli 条件不在当前 VM DSL 子集内，改成 `WriteRingBuffer` 无条件 BLOCK（返回 -9）；
+- `CVE-2026-111497` 已恢复原始 observer 语义：callsite observer + `local("available_in")`
+  + 动态 key `arg0` + `map_present` / `map_take`；用合成 brotli fixture 单独验证；
 - 分析见 `docs/ai/DSL_RETURN_ONLY_ANALYSIS.md`。
 
 ### 合成 fixture VM 验证
@@ -278,20 +295,23 @@ JS 后端现在只作为对照/应急路径；默认是 VM。
 python -m runtime.dsl.vm_validate
 ```
 
-最近结果：**26/26 VM 场景通过**
+最近结果：**25/25 VM 场景通过**（111497 单独验证）。
 
-### 程序级 map / observer 验证
+### 程序级 map / observer / callsite / local 验证
 
 ```sh
 python -m runtime.dsl.vm_map_validate
+python -m runtime.dsl.vm_callsite_validate
+python -m runtime.dsl.vm_brotli_validate
 ```
 
-用户态 fixture：
-
-- observer `observe_limit` 写入 `map["limits"]["max_upload"]=100`；
-- guard `target_fn(101)` → BLOCK（-73），`target_fn(50)` → PASS（0）；
-- 结果：`blocked=-73, passed=0, body_calls=1`，map 值 `100`。
-（20 BLOCK + 5 PASS + 1 真实内存读取场景）。
+- `vm_map_validate`：动态 key + `map_take` consume；
+  - 第一次 `target_fn(1,101)` → BLOCK（-73）；
+  - 第二次 `target_fn(1,101)` → PASS（0，key 已消费）；
+  - `body_calls=1`。
+- `vm_callsite_validate`：callsite observer + `local("available_in")`，`body_calls=0`。
+- `vm_brotli_validate`：原始 111497 DSL（callsite + local + 动态 key +
+  `map_present` / `map_take`），`body_calls=0`。
 
 ### 真实 nginx 1.31.6 验证
 
@@ -325,7 +345,9 @@ deploy/             systemd/权限说明
 - VM 只读，不支持 action writes（写字段需后续两阶段 action）；
 - DSL → VM 目前只支持 20 例子集：无循环、callsite 仅解析直接 call（PLT/内联有限）；
 - 位置解析只适配 x86-64 Linux；
-- map 只支持编译期字面量 key（运行时字符串 key 未支持）；
+- map 支持编译期字面量 key 和动态 u64 key；运行时字符串 key 还未支持；
+- map 仍是程序级全局，没有 thread-scoped 分片；
+- caller 局部变量只支持 DWARF exprloc（reg/breg/fbreg/const/deref）；loclist 尚未实现；
 - Frida 回调仍只适合单线程路径；
 - 没有常驻 daemon / uninstall 子命令；
 - 安装失败无完整事务回滚；

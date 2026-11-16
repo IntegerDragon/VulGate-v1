@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 from runtime.frida import symbols as frida_symbols  # noqa: E402
 from runtime.dsl import parser as dsl_parser  # noqa: E402
 from runtime.dsl import x86 as dsl_x86  # noqa: E402
+from runtime.dsl import dwarf_local  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,16 @@ def resolve_patch(patch: dsl_parser.PatchSpec, pid: int | None = None,
             except dsl_x86.ResolveError as error:
                 raise ValueError(str(error)) from error
             mount.module = module_name
+            if mount.location_kind == 'callsite':
+                names = __import__('re').findall(r'local\("([^"]+)"\)', mount.body)
+                bias = frida_symbols.load_bias(path) or 0
+                pc = base + 0 if False else None
+                for name in names:
+                    try:
+                        mount.local_recipes[name] = dwarf_local.resolve_local(
+                            path, mount.caller, name)
+                    except dwarf_local.ResolveError as error:
+                        raise ValueError(str(error)) from error
             continue
         binary = None
         if mount.module:
@@ -213,4 +224,5 @@ def resolve_global(name: str, pid: int | None, module_name: str | None,
     if offset is None:
         raise ValueError('global symbol not found: ' + name)
     return (module, base + offset)
+
 

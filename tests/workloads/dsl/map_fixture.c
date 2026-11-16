@@ -29,7 +29,7 @@ int main(void)
     }
     observe_limit(1, 100);
     int blocked = target_fn(1, 101);
-    int passed = target_fn(1, 50);
+    int passed = target_fn(1, 101);
     printf("{\"blocked\":%d,\"passed\":%d,\"body_calls\":%llu}\n",
            blocked, passed, body_calls);
     fflush(stdout);

@@ -204,7 +204,7 @@ Frida attach 璺緞闄愬埗锛堣瑙?`docs/ai/FRIDA_THREAD_SAFETY.md`锛�
 - 20 涓?CVE 鐨?DSL 浣嶄簬 `runtime/dsl/patches/*.vg`锛岀敱 `runtime/dsl/generate20.py`
   浠?`build/declarative20-specs` 鐢熸垚锛?
 - 楠岃瘉锛歚runtime/dsl/validate20.py` 鐢ㄥ悎鎴?fixture 楠岃瘉 BLOCK/PASS/鐪熷疄鍐呭瓨璇诲彇锛?
-  鏈嶅姟鍣ㄥ疄娴?**30/30 鍦烘櫙閫氳繃**锛?
+  鏈嶅姟鍣ㄥ疄娴?**25/25 鍦烘櫙閫氳繃**锛?
 - 闄愬埗锛欶rida 鍗曠嚎绋嬭矾寰勩€佺粨鏋勪綋杩斿洖/鍔ㄤ綔 writes/鐪熷疄 callsite 鏈帴鍏ワ紝璇﹁
   `runtime/dsl/README.md`銆?
 

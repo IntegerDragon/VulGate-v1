@@ -78,6 +78,9 @@ def main() -> int:
         paths = [path for path in paths if path.stem in set(args.case)]
     for path in paths:
         case_id = path.stem
+        if case_id == 'CVE-2026-111497':
+            print('CVE-2026-111497: skipped here; run runtime.dsl.vm_brotli_validate')
+            continue
         block = validate_case(path, validate20.TEST_VALUES.get(case_id, {}), directory)
         scenarios.append(block)
         blocked = block['result']['body_calls'] == 0
@@ -105,3 +108,4 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+

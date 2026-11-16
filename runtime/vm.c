@@ -604,6 +604,9 @@ static int run_helper(shadow_u64 helper_id,
             regs[0] = 0;
             return 0;
         }
+        if (regs[3] != 0) {
+            shadow_map_delete(&ctx->maps[regs[1]], regs[2]);
+        }
         regs[0] = value;
         return 0;
     }

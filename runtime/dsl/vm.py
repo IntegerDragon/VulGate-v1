@@ -9,7 +9,7 @@ returning SHADOW_PASS/SHADOW_BLOCK.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 import struct
 
@@ -41,6 +41,7 @@ HELPER_READ_U32 = 5
 HELPER_READ_U64 = 6
 HELPER_MAP_SET = 9
 HELPER_MAP_GET = 10
+HELPER_MAP_PRESENT = 11
 
 READ_HELPERS = {
     'vg_read_u8': HELPER_READ_U8,
@@ -155,9 +156,42 @@ class Parser:
                 _, map_name = self.take()
                 self.take(']')
                 self.take('[')
-                _, key = self.take()
+                key = self.expression(0)
                 self.take(']')
-                return ('mapget', map_name.strip('"'), key.strip('"'))
+                return ('mapget', map_name.strip('"'), key, False)
+            if value == 'map_take':
+                self.take('(')
+                _, map_name = self.take()
+                self.take(',')
+                key = self.expression(0)
+                self.take(')')
+                return ('mapget', map_name.strip('"'), key, True)
+            if value == 'map_present':
+                self.take('(')
+                _, map_name = self.take()
+                self.take(',')
+                key = self.expression(0)
+                self.take(')')
+                return ('mappresent', map_name.strip('"'), key)
+            if value == 'map_get':
+                self.take('(')
+                _, map_name = self.take()
+                self.take(',')
+                key = self.expression(0)
+                if self.peek() and self.peek()[1] == ',':
+                    self.take(',')
+                    self.take('consume')
+                    self.take('=')
+                    consume = self.expression(0)
+                    self.take(')')
+                    return ('mapget', map_name.strip('"'), key, True)
+                self.take(')')
+                return ('mapget', map_name.strip('"'), key, False)
+            if value == 'local':
+                self.take('(')
+                _, name = self.take()
+                self.take(')')
+                return ('local', name.strip('"'))
             if re.fullmatch(r'arg\d+', value):
                 return ('arg', int(value[3:]))
             raise ExprError('unknown name: ' + value)
@@ -220,11 +254,13 @@ class Assembler:
 
 class Compiler:
     def __init__(self, selectors: dict[str, object], globals_: dict[str, int],
-                 overrides: dict[str, int] | None = None, map_state=None):
+                 overrides: dict[str, int] | None = None, map_state=None,
+                 local_slots: dict[str, int] | None = None):
         self.selectors = selectors
         self.globals = globals_
         self.overrides = overrides or {}
         self.map_state = map_state
+        self.local_slots = local_slots or {}
         self.asm = Assembler()
 
     def value(self, node, dst: int = 6) -> None:
@@ -250,10 +286,26 @@ class Compiler:
             if self.map_state is None:
                 raise ExprError('map used without a map declaration')
             map_id = self.map_state.map_id(node[1])
-            key_id = self.map_state.key_id(node[1], node[2])
+            key_node = node[2]
+            consume = bool(node[3]) if len(node) > 3 else False
+            self.map_key(node[1], key_node, 2)
             self.asm.emit(OP_MOV_K64, 1, imm=map_id)
-            self.asm.emit(OP_MOV_K64, 2, imm=key_id)
+            self.asm.emit(OP_MOV_K64, 3, imm=1 if consume else 0)
             self.asm.emit(OP_CALL, imm=HELPER_MAP_GET)
+            self.asm.emit(OP_MOV_X64, dst, 0)
+        elif kind == 'mappresent':
+            if self.map_state is None:
+                raise ExprError('map used without a map declaration')
+            map_id = self.map_state.map_id(node[1])
+            self.map_key(node[1], node[2], 2)
+            self.asm.emit(OP_MOV_K64, 1, imm=map_id)
+            self.asm.emit(OP_CALL, imm=HELPER_MAP_PRESENT)
+            self.asm.emit(OP_MOV_X64, dst, 0)
+        elif kind == 'local':
+            if node[1] not in self.local_slots:
+                raise ExprError('local not resolved: ' + node[1])
+            self.asm.emit(OP_MOV_K64, 1, imm=self.local_slots[node[1]])
+            self.asm.emit(OP_CALL, imm=HELPER_GET_REG)
             self.asm.emit(OP_MOV_X64, dst, 0)
         elif kind == 'read':
             self.value(node[2], 1)
@@ -337,14 +389,21 @@ class Compiler:
         self.asm.emit(OP_JNE_X, 6, 7, target=yes)
         self.asm.jump(no)
 
-    def map_set(self, map_name: str, key: str, value_node) -> None:
+    def map_key(self, map_name: str, key_node, dst: int) -> None:
+        if key_node[0] == 'string':
+            self.asm.emit(OP_MOV_K64, dst,
+                          imm=self.map_state.key_id(map_name, key_node[1]))
+        else:
+            self.value(key_node, dst)
+
+    def map_set(self, map_name: str, key_node, value_node) -> None:
         if self.map_state is None:
             raise ExprError('map used without a map declaration')
         map_id = self.map_state.map_id(map_name)
-        key_id = self.map_state.key_id(map_name, key)
+        self.map_key(map_name, key_node, 9)
         self.value(value_node, 3)
         self.asm.emit(OP_MOV_K64, 1, imm=map_id)
-        self.asm.emit(OP_MOV_K64, 2, imm=key_id)
+        self.asm.emit(OP_MOV_X64, 2, 9)
         self.asm.emit(OP_CALL, imm=HELPER_MAP_SET)
 
     def compile(self, condition) -> bytes:
@@ -371,6 +430,7 @@ class VMMount:
     code: bytes
     action_id: str | None
     nature: str = 'intercept'
+    locals: list[dict] = None
 
 
 @dataclass
@@ -423,11 +483,11 @@ def _extract_observer(body: str) -> list[tuple[str, str, str]]:
     assignments = []
     for line in body.splitlines():
         match = re.match(
-            r'\s*map\["([^"]+)"\]\["([^"]+)"\]\s*=\s*(.+?);\s*$', line)
+            r'\s*map\["([^"]+)"\]\[(.+?)\]\s*=\s*(.+?);\s*$', line)
         if match:
             assignments.append((match.group(1), match.group(2), match.group(3)))
     if not assignments:
-        raise ExprError('read_point behavior needs map["name"]["key"] = ...;')
+        raise ExprError('read_point behavior needs map["name"][key] = ...;')
     return assignments
 
 
@@ -442,19 +502,26 @@ def compile_patch(patch: dsl_parser.PatchSpec,
         nature = 'read_point' if read_point else 'intercept'
         if read_point:
             assignments = _extract_observer(mount.body)
-            compiler = Compiler({}, global_addresses, overrides, state)
-            for map_name, key, expression in assignments:
-                compiler.map_set(map_name, key, Parser(expression).parse())
+            local_slots = {name: index for index, name in enumerate(mount.local_recipes)}
+            compiler = Compiler({}, global_addresses, overrides, state, local_slots)
+            for map_name, key_expression, expression in assignments:
+                compiler.map_set(map_name, Parser(key_expression).parse(),
+                                 Parser(expression).parse())
             compiler.asm.emit(OP_MOV_K64, 0, imm=0)
             compiler.asm.emit(OP_EXIT)
             mounts.append(VMMount(mount.id, mount.module, mount.symbol, mount.offset,
                                   list(mount.args), mount.return_type,
-                                  compiler.asm.finalize(), None, nature))
+                                  compiler.asm.finalize(), None, nature,
+                                  [{'name': name, 'slot': slot,
+                                    'recipe': mount.local_recipes[name]}
+                                   for name, slot in local_slots.items()]))
             continue
         raw_selectors, condition_text, action_id = _extract(mount.body)
         selectors = {name: Parser(text).parse() for name, text in raw_selectors.items()}
         condition = Parser(condition_text).parse()
-        code = Compiler(selectors, global_addresses, overrides, state).compile(condition)
+        local_slots = {name: index for index, name in enumerate(mount.local_recipes)}
+        code = Compiler(selectors, global_addresses, overrides, state,
+                        local_slots).compile(condition)
         mounts.append(VMMount(mount.id, mount.module, mount.symbol, mount.offset,
                               list(mount.args), mount.return_type, code, action_id,
                               nature))
@@ -467,4 +534,5 @@ def compile_patch(patch: dsl_parser.PatchSpec,
 def compile_text(text: str, global_addresses: dict[str, int] | None = None,
                  overrides: dict[str, int] | None = None) -> VMPatch:
     return compile_patch(dsl_parser.parse(text), global_addresses, overrides)
+
 

@@ -55,9 +55,13 @@ def symbol_ranges(binary: Path, nm: str = 'nm') -> list[SymbolRange]:
             address = int(parts[0], 16)
         except ValueError:
             continue
-        if parts[1].isdigit() and len(parts) >= 4:
-            size = int(parts[1], 16)
-            kind, name = parts[2], parts[3]
+        if len(parts) >= 4:
+            try:
+                size = int(parts[1], 16)
+                kind, name = parts[2], parts[3]
+            except ValueError:
+                size = 0
+                kind, name = parts[1], parts[2]
         else:
             size = 0
             kind, name = parts[1], parts[2]
