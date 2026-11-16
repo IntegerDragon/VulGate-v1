@@ -167,7 +167,7 @@ function vg_install() {
                      nature: spec.nature, program: code});
       continue;
     }
-    const original = new SystemFunction(ptr(spec.target), spec.return_type, spec.args);
+    const original = new NativeFunction(ptr(spec.target), spec.return_type, spec.args);
     const callback = new NativeCallback(function() {
       VG_HITS[spec.id] = (VG_HITS[spec.id] || 0) + 1;
       const values = Array.prototype.slice.call(arguments);

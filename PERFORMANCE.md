@@ -51,9 +51,13 @@ injector: Frida 17.26.2 / Python 3.12
 - 该补丁把 302 改成 500，业务路径本身不同，所以 RPS 差异不等同于纯 hook 开销；
 - 但 VM 和 baseline 的差距在 5 次中都存在，方向稳定。
 
+## 已验证
+
+- PASS 路径在真实 nginx 上已验证：`/rewrite/ordinary` 返回 302，不再挂住；
+- BLOCK 路径返回 500；
+
 ## 未测 / 不可测
 
-- PASS 路径在真实 nginx 上挂住；
 - 多线程 Frida 回调挂住；
 - 真实 PHP / httpd / brotli 目标不在清理后的仓库/服务器中，未接入；
 - nginx 未 CPU 绑核，数据仍有环境噪声。

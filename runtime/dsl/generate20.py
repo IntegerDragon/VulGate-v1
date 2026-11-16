@@ -226,13 +226,13 @@ mount CVE-2026-93479/ngx_http_script_check_length:
 """,
     'CVE-2026-42945': """action REWRITE_BLOCK:
 {
-    return_type: int
+    return_type: int64
     return: 500
 }
 
 mount CVE-2026-42945/ngx_http_rewrite_handler:
 {
-    location: symbol="ngx_http_rewrite_handler", args=[pointer], return=int
+    location: symbol="ngx_http_rewrite_handler", args=[pointer], return=int64
     nature: intercept
     behavior:
     {
@@ -244,13 +244,13 @@ mount CVE-2026-42945/ngx_http_rewrite_handler:
 """,
     'CVE-2026-9256': """action REWRITE_BLOCK:
 {
-    return_type: int
+    return_type: int64
     return: 500
 }
 
 mount CVE-2026-9256/ngx_http_rewrite_handler:
 {
-    location: symbol="ngx_http_rewrite_handler", args=[pointer], return=int
+    location: symbol="ngx_http_rewrite_handler", args=[pointer], return=int64
     nature: intercept
     behavior:
     {
