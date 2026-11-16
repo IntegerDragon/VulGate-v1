@@ -85,3 +85,116 @@ Frida + JS + marshal: ~98–99%
 - native plthook/inline backend 对照。
 
 这些按 `docs/ai/PERFORMANCE_EVALUATION.md` 的方法补测。
+
+---
+
+## 六、真实 nginx 应用级
+
+目标：`nginx 1.31.6`，单进程（`master_process off`），
+请求 `/rewrite/ordinary`，补丁 `CVE-2026-42945`（rewrite_handler 无条件 500）。
+
+负载：本地 `http.client` 32 线程闭路，10 s，预热 1 s。
+
+| 模式 | RPS | p50 ms | p95 ms | p99 ms | 状态 |
+|---|---:|---:|---:|---:|---|
+| baseline | 894.52 | 30.015 | 76.158 | 101.697 | 302 |
+| VM backend | 859.97 | 33.087 | 79.776 | 106.807 | 500 |
+| JS backend | 856.49 | 32.994 | 80.834 | 105.053 | 500 |
+
+重复两次的范围：
+
+```text
+baseline RPS: 894.52–939.59
+VM RPS:       843.11–859.97
+JS RPS:       841.92–856.49
+
+baseline p95: 73.30–76.16 ms
+VM p95:       79.78–80.81 ms
+JS p95:       80.83–80.99 ms
+```
+
+解读：
+
+- 该补丁改变了响应（302→500），所以 RPS 差异包含业务路径差异；
+- VM 与 JS backend 几乎相同，说明当前瓶颈在 Frida/JS 回调，不在 VM；
+- 相对 baseline，VM/JS 的 p95 增加约 3.6–4.7 ms，主要是每请求多一次
+  Frida→JS→VM 链，以及 302/500 路径差异。
+
+`perf stat`（同一次 10 s 负载，block 路径）：
+
+| 模式 | cycles | instructions | cache-misses | branch-misses | 请求数 |
+|---|---:|---:|---:|---:|---:|
+| baseline | 15.94 B | 62.83 B | 0.624 M | 10.96 M | 9397 |
+| VM | 5.47 B | 18.08 B | 1.897 M | 14.79 M | 8652 |
+
+注意：VM 模式走 500 提前返回，指令数明显更少，**不能直接用这组数算 overhead**。
+它只能说明 500 路径本身的指令数更低，以及 branch-misses/request 更高。
+
+## 七、Pass-through 对照（失败）
+
+为了在“相同业务路径”下测链开销，构造了一个恒 PASS 的 rewrite 补丁：
+
+```text
+mount pass_rewrite:
+    if (false) return block(...)
+```
+
+结果：
+
+```text
+baseline: 903.83 RPS, 302
+VM:       0 RPS, 96 errors，请求超时
+JS:       0 RPS, 96 errors，请求超时
+```
+
+detach 后 nginx 恢复，说明不是进程崩溃，而是 **PASS 回调在 nginx 上挂住**。
+合成 fixture 的 PASS 路径可以完成（例如 93479 len=0 场景），但真实 nginx
+的 PASS 链路当前不可用/不稳定。
+
+这也是为什么上表只能用 BLOCK 路径做应用级测量。
+
+## 八、多线程
+
+用 pthread fixture（1/4 个线程，每线程 20k 次调用）测 Frida→VM 链：
+
+```text
+threads=1: no fixture result（挂住）
+threads=4: no fixture result（挂住）
+```
+
+在合成单线程 fixture 上同样的 patch 可以完成；多线程回调当前会挂住，
+和之前“Frida 回调只适合单线程路径”的限制一致。
+
+因此：
+
+- **多线程并发 map 竞争没有可报告数据**；
+- 当前实现不能用于多线程目标；
+- 必须先做 thread-scoped map + Frida 回调线程安全，才能测并发。
+
+## 九、Native / PHP / httpd / brotli
+
+服务器检查结果：
+
+- `build/native` 不存在，native plthook/inline 未构建；
+- `php`、`httpd` 命令不存在；
+- 系统有 `libbrotli*.so`，但没有 patch 目标 `libpd_brotli.so`，
+  且 `WriteRingBuffer` 是内部符号，不能直接替换。
+
+因此：
+
+| 项目 | 状态 |
+|---|---|
+| native backend 对照 | 未测（未构建） |
+| 真实 PHP | 未测（无目标） |
+| 真实 httpd | 未测（无目标） |
+| 真实 brotli | 未测（无目标） |
+| 真实 nginx | 已测（上表） |
+
+## 十、目前能下的性能结论
+
+1. 合成链：VM 61–86 ns，完整 Frida→VM 4.8–8.6 µs/hit；
+2. 真实 nginx：RPS 约 -4%，p95 +3.6–4.7 ms（含 302/500 路径差异）；
+3. VM 与 JS backend 几乎同速 → 瓶颈在 Frida/JS/marshal；
+4. PASS 路径在 nginx 上挂住，当前只能可靠测 BLOCK 路径；
+5. 多线程会挂住，当前不可用；
+6. native/PHP/httpd/brotli 目标缺失，无法实测。
