@@ -52,7 +52,9 @@ def _target_address(pid: int | None, mount: dsl_parser.MountSpec,
 def _action_value(action: dsl_parser.ActionSpec) -> str:
     if action.return_type == 'void':
         return 'undefined'
-    if action.return_type in ('pointer', 'string') or action.value is None:
+    if action.return_type == 'pointer':
+        return 'ptr(0)' if action.value is None else 'ptr(' + str(int(action.value)) + ')'
+    if action.return_type == 'string':
         return 'null' if action.value is None else 'Memory.allocUtf8String(%s)' % json.dumps(str(action.value))
     return str(int(action.value))
 
