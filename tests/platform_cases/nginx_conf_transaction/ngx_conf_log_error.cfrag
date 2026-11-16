@@ -1,6 +1,0 @@
-{
-    (void) level;
-    (void) cf;
-    (void) err;
-    (void) fmt;
-}

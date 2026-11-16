@@ -1,8 +1,8 @@
-#ifndef _GNU_SOURCE
+﻿#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include "autoshield.h"
-#include "../experiment/state.h"
+#include "state.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -264,4 +264,5 @@ int safe_read(void *dst, const void *src, size_t len)
     }
     return rc;
 }
+
 

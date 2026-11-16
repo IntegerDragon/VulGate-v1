@@ -1,7 +1,0 @@
-mov64 r1, {arg_index}
-call get_arg
-jgt r0, {threshold}, +2
-mov64 r0, pass
-exit
-mov64 r0, block
-exit

@@ -17,7 +17,7 @@ from runtime.dsl import parser as dsl_parser  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dsl', type=Path, required=True)
-    target = parser.add_mutually_exclusive_group(required=True)
+    target = parser.add_mutually_exclusive_group(required=False)
     target.add_argument('--pid', type=int)
     target.add_argument('--spawn', type=Path)
     parser.add_argument('--duration', type=float, default=5.0)
@@ -25,6 +25,8 @@ def main() -> int:
     parser.add_argument('--summary', type=Path)
     parser.add_argument('--bridge-dir', type=Path, default=ROOT / 'build' / 'frida-vm')
     args = parser.parse_args()
+    if not args.check and args.pid is None and args.spawn is None:
+        parser.error('one of --pid/--spawn is required unless --check is used')
 
     from runtime.dsl import vm_run
     patch = dsl_parser.load(args.dsl)

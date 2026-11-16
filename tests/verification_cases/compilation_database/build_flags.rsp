@@ -1,1 +1,0 @@
--std=c99 -m64 -Iinclude -DLIMIT=4 -c src/operation.c -o operation.o

@@ -327,10 +327,9 @@ python -m runtime.dsl.vm_93479_validate
 ```text
 runtime/dsl/        DSL 解析、VM 字节码编译、自动 offset、VM 安装、20 个补丁
 runtime/vm.c        Shadow VM（eBPF 子集、只读判定）
-runtime/frida/      Frida bridge/agent、多进程、metrics/控制通道
-runtime/native/     plthook / inline 原生后端（实验）
-runtime/preload/    LD_PRELOAD 原生模式
-tests/              DSL VM、Frida、native、baseline 测试
+runtime/frida/      Frida bridge/build/symbols（主链安装器）
+tests/              DSL VM 单元测试与 synthetic fixture
+tools/bench_*       性能测量脚本
 deploy/             systemd/权限说明
 ```
 

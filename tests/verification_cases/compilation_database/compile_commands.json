@@ -1,8 +1,0 @@
-[
-  {
-    "directory": ".",
-    "file": "src/operation.c",
-    "output": "operation.o",
-    "arguments": ["gcc", "@build_flags.rsp"]
-  }
-]

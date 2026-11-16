@@ -1,8 +1,0 @@
-{
-  "schema": 1,
-  "sources": ["program.c"],
-  "entry": "verify_request",
-  "targets": ["target.unavailable_operation"],
-  "unwind": 8,
-  "timeout": 30
-}

@@ -1,8 +1,0 @@
-{
-  "schema": 1,
-  "sources": ["program.c"],
-  "entry": "verify_service",
-  "targets": ["target.capacity_contract"],
-  "unwind": 8,
-  "timeout": 30
-}
