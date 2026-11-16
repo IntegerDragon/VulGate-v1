@@ -303,6 +303,7 @@ python -m runtime.dsl.vm_validate
 python -m runtime.dsl.vm_map_validate
 python -m runtime.dsl.vm_callsite_validate
 python -m runtime.dsl.vm_brotli_validate
+python -m runtime.dsl.vm_php_validate
 ```
 
 - `vm_map_validate`：动态 key + `map_take` consume；
@@ -312,6 +313,7 @@ python -m runtime.dsl.vm_brotli_validate
 - `vm_callsite_validate`：callsite observer + `local("available_in")`，`body_calls=0`。
 - `vm_brotli_validate`：原始 111497 DSL（callsite + local + 动态 key +
   `map_present` / `map_take`），`body_calls=0`。
+- `vm_php_validate`：PHP 109618 原 DSL 的全局 selector 真实读取，`body_calls=0`。
 
 ### 真实 nginx 1.31.6 验证
 

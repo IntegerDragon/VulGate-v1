@@ -104,6 +104,7 @@ python -m runtime.dsl.vm_validate
 python -m runtime.dsl.vm_map_validate
 python -m runtime.dsl.vm_callsite_validate
 python -m runtime.dsl.vm_brotli_validate
+python -m runtime.dsl.vm_php_validate
 ```
 
 服务器最近结果：
@@ -113,7 +114,8 @@ python -m runtime.dsl.vm_brotli_validate
   `body_calls=1`；
 - `vm_callsite_validate`：callsite + `local("available_in")`，`body_calls=0`；
 - `vm_brotli_validate`：原始 111497 DSL（callsite + local + 动态 key +
-  present/take），`body_calls=0`。
+  present/take），`body_calls=0`；
+- `vm_php_validate`：PHP 109618 原 DSL 的全局 selector 真实读取，`body_calls=0`。
 
 真实 nginx 1.31.6：
 
