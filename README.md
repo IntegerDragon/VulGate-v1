@@ -283,7 +283,8 @@ JS 后端现在只作为对照/应急路径；默认是 VM。
 
 - 17 个 action 无 writes，天然 return-only；
 - 3 个写依赖补丁改成 return-only 挂载：
-  - `CVE-2026-93479` → `ngx_http_script_run` 返回 NULL；
+  - `CVE-2026-93479` 恢复到官方粒度 `ngx_http_script_check_length + length != 0`，返回 -1；
+  另提供更细的 `patches_fine/CVE-2026-93479.vg`（`end - pos < len`）；
   - `CVE-2026-42945` / `9256` → `ngx_http_rewrite_handler` 返回 500；
 - `CVE-2026-111497` 已恢复原始 observer 语义：callsite observer + `local("available_in")`
   + 动态 key `arg0` + `map_present` / `map_take`；用合成 brotli fixture 单独验证；
@@ -295,7 +296,7 @@ JS 后端现在只作为对照/应急路径；默认是 VM。
 python -m runtime.dsl.vm_validate
 ```
 
-最近结果：**25/25 VM 场景通过**（111497 单独验证）。
+最近结果：**24/24 VM 场景通过**（111497 / 93479 单独验证）。
 
 ### 程序级 map / observer / callsite / local 验证
 
@@ -304,6 +305,7 @@ python -m runtime.dsl.vm_map_validate
 python -m runtime.dsl.vm_callsite_validate
 python -m runtime.dsl.vm_brotli_validate
 python -m runtime.dsl.vm_php_validate
+python -m runtime.dsl.vm_93479_validate
 ```
 
 - `vm_map_validate`：动态 key + `map_take` consume；
@@ -313,14 +315,15 @@ python -m runtime.dsl.vm_php_validate
 - `vm_callsite_validate`：callsite observer + `local("available_in")`，`body_calls=0`。
 - `vm_brotli_validate`：原始 111497 DSL（callsite + local + 动态 key +
   `map_present` / `map_take`），`body_calls=0`。
-- `vm_php_validate`：PHP 109618 原 DSL 的全局 selector 真实读取，`body_calls=0`。
+- `vm_php_validate`：PHP 109618 原 DSL 的全局 selector 真实读取，`body_calls=0`；
+- `vm_93479_validate`：官方粒度 `check_length + length != 0` 和细粒度 `end - pos < len` 两个版本。
 
 ### 真实 nginx 1.31.6 验证
 
 | 用例 | 请求 | baseline | VM patched |
 |---|---|---|---|
 | CVE-2026-27654 | DAV `COPY` | 204 | **405** |
-| CVE-2026-93479 | `/dynamic/file.txt?dir=www` | 200 | **500** |
+| CVE-2026-93479（官方粒度） | `/dynamic/file.txt?dir=www` | 200 | 200（已命中，无 writes 不产生 500） |
 | CVE-2026-42945 | `/rewrite/ordinary` | 302 | **500** |
 
 均通过 `runtime.dsl.vm_run` 安装，命中计数为 1。

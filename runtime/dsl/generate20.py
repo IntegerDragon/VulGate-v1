@@ -205,20 +205,21 @@ mount refill_capacity:
     }
 }
 """,
-    'CVE-2026-93479': """action SCRIPT_RUN_BLOCK:
+    'CVE-2026-93479': """action NGX_SCRIPT_EXIT_INT_ERROR:
 {
-    return_type: pointer
-    return: null
+    return_type: int64
+    return: -1
 }
 
-mount CVE-2026-93479/ngx_http_script_run:
+mount CVE-2026-93479/ngx_http_script_check_length:
 {
-    location: symbol="ngx_http_script_run", args=[pointer, pointer, pointer, uint64, pointer], return=pointer
+    location: symbol="ngx_http_script_check_length", args=[pointer, uint64], return=int64
     nature: intercept
     behavior:
     {
-        if (true) {
-            return block("SCRIPT_RUN_BLOCK");
+        value["length"] = arg1;
+        if (value["length"] != 0) {
+            return block("NGX_SCRIPT_EXIT_INT_ERROR");
         }
     }
 }

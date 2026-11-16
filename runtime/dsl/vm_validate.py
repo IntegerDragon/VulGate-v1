@@ -81,6 +81,9 @@ def main() -> int:
         if case_id == 'CVE-2026-111497':
             print('CVE-2026-111497: skipped here; run runtime.dsl.vm_brotli_validate')
             continue
+        if case_id == 'CVE-2026-93479':
+            print('CVE-2026-93479: skipped here; run runtime.dsl.vm_93479_validate')
+            continue
         block = validate_case(path, validate20.TEST_VALUES.get(case_id, {}), directory)
         scenarios.append(block)
         blocked = block['result']['body_calls'] == 0
@@ -108,4 +111,5 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
 

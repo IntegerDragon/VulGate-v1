@@ -105,17 +105,19 @@ python -m runtime.dsl.vm_map_validate
 python -m runtime.dsl.vm_callsite_validate
 python -m runtime.dsl.vm_brotli_validate
 python -m runtime.dsl.vm_php_validate
+python -m runtime.dsl.vm_93479_validate
 ```
 
 服务器最近结果：
 
-- `vm_validate`：**25/25**（111497 单独验证）；
+- `vm_validate`：**24/24**（111497 / 93479 单独验证）；
 - `vm_map_validate`：动态 key + consume，第一次 BLOCK、第二次 PASS，
   `body_calls=1`；
 - `vm_callsite_validate`：callsite + `local("available_in")`，`body_calls=0`；
 - `vm_brotli_validate`：原始 111497 DSL（callsite + local + 动态 key +
   present/take），`body_calls=0`；
-- `vm_php_validate`：PHP 109618 原 DSL 的全局 selector 真实读取，`body_calls=0`。
+- `vm_php_validate`：PHP 109618 原 DSL 的全局 selector 真实读取，`body_calls=0`；
+- `vm_93479_validate`：官方粒度 `check_length + length != 0` 和细粒度 `end - pos < len` 两个版本。
 
 真实 nginx 1.31.6：
 

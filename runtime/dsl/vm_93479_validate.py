@@ -1,4 +1,4 @@
-"""Validate the precise 93479 check_length condition on a synthetic fixture."""
+"""Validate official-granularity and fine-grained 93479 variants."""
 from __future__ import annotations
 
 import json
@@ -17,13 +17,11 @@ from runtime.dsl import vm as dsl_vm  # noqa: E402
 from runtime.dsl import vm_run  # noqa: E402
 
 
-def main() -> int:
+def run_case(dsl_path: Path, expected: dict, fixture_source: Path) -> None:
     import frida
-    dsl_path = ROOT / 'runtime' / 'dsl' / 'patches_fine' / 'CVE-2026-93479.vg'
     fixture = Path(tempfile.mkdtemp(prefix='dsl-93479-')) / 'script_length_fixture'
     subprocess.run(['gcc', '-O0', '-g', '-no-pie', '-rdynamic',
-                    str(ROOT / 'tests' / 'workloads' / 'dsl' / 'script_length_fixture.c'),
-                    '-o', str(fixture)], check=True)
+                    str(fixture_source), '-o', str(fixture)], check=True)
     patch = dsl_parser.load(dsl_path)
     proc = subprocess.Popen([str(fixture)], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -41,20 +39,17 @@ def main() -> int:
         session = frida.get_local_device().attach(proc.pid)
         script = session.create_script(vm_run._script(patch, compiled, targets, bridge))
         script.load()
-        print('install', script.exports_sync.install())
+        print(dsl_path.name, 'install', script.exports_sync.install())
         proc.stdin.write('go\n')
         proc.stdin.flush()
         line = proc.stdout.readline()
         if not line:
             raise RuntimeError('fixture produced no result: ' + proc.stderr.read())
         result = json.loads(line)
-        print('result', result)
-        assert result['enough'] == 0, result
-        assert result['too_long'] == -1, result
-        assert result['body_calls'] == 1, result
+        print(dsl_path.name, 'result', result)
+        for key, value in expected.items():
+            assert result[key] == value, (dsl_path.name, result, expected)
         proc.wait(timeout=5)
-        print('93479 precise check_length test passed')
-        return 0
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -64,6 +59,16 @@ def main() -> int:
                 session.detach()
             except Exception:
                 pass
+
+
+def main() -> int:
+    fixture = ROOT / 'tests' / 'workloads' / 'dsl' / 'script_length_fixture.c'
+    run_case(ROOT / 'runtime' / 'dsl' / 'patches' / 'CVE-2026-93479.vg',
+             {'enough': -1, 'too_long': -1, 'body_calls': 0}, fixture)
+    run_case(ROOT / 'runtime' / 'dsl' / 'patches_fine' / 'CVE-2026-93479.vg',
+             {'enough': 0, 'too_long': -1, 'body_calls': 1}, fixture)
+    print('93479 official-granularity and fine variants passed')
+    return 0
 
 
 if __name__ == '__main__':

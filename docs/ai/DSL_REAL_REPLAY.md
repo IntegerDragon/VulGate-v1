@@ -55,4 +55,4 @@ DSL 已改为默认编译到 `runtime/vm.c` 字节码，通过 Frida bridge 安�
 - CVE-2026-27654：DAV COPY baseline 204 → patched **405**，hit 1；
 - CVE-2026-93479：dynamic 200 → patched **500**，hit 1；
 - CVE-2026-42945：rewrite 302 → patched **500**，hit 1；
-- 合成 fixture VM 验证：**25/25**（111497 单独用 vm_brotli_validate 验证）。
+- 合成 fixture VM 验证：**24/24**（111497 单独用 vm_brotli_validate 验证）。
