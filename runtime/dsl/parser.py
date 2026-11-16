@@ -208,9 +208,10 @@ def _parse_call_location(text: str) -> tuple[str, dict]:
     return kind, attrs
 
 
-def _parse_location(text: str) -> tuple[str | None, str, list[str], str, int | None]:
+def _parse_location(text: str) -> tuple[str | None, str, list[str], str, int | None, str | None]:
     module = None
     symbol = None
+    caller = None
     args: list[str] = []
     return_type = 'int'
     offset = None
@@ -259,11 +260,13 @@ def _parse_location(text: str) -> tuple[str | None, str, list[str], str, int | N
             return_type = value.strip('"\'')
         elif key in ('offset', '偏移'):
             offset = int(value.strip(), 0)
+        elif key == 'caller':
+            caller = value.strip('"\'')
         else:
             raise DSLParseError('unknown location field: ' + key)
     if not symbol:
         raise DSLParseError('location needs symbol')
-    return module, symbol, args, return_type, offset
+    return module, symbol, args, return_type, offset, caller
 
 
 def _parse_action(identifier: str, body: str) -> ActionSpec:
@@ -323,7 +326,9 @@ def parse(text: str) -> PatchSpec:
             offset = attrs.get('offset')
             offset = int(offset, 0) if isinstance(offset, str) else offset
         else:
-            module, symbol, args, return_type, offset = _parse_location(location)
+            module, symbol, args, return_type, offset, location_caller = _parse_location(location)
+            if location_caller:
+                caller = location_caller
         nature = fields.get('性质', fields.get('nature', '拦截点')).strip()
         if nature not in ('拦截点', '读取点', 'intercept', 'read', 'read_point'):
             raise DSLParseError(f'mount {identifier} has invalid 性质: {nature}')

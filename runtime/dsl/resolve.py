@@ -116,13 +116,31 @@ def resolve_patch(patch: dsl_parser.PatchSpec, pid: int | None = None,
             if mount.location_kind == 'callsite':
                 names = __import__('re').findall(r'local\("([^"]+)"\)', mount.body)
                 bias = frida_symbols.load_bias(path) or 0
-                pc = base + 0 if False else None
+                pc = base + mount.offset
                 for name in names:
                     try:
                         mount.local_recipes[name] = dwarf_local.resolve_local(
-                            path, mount.caller, name)
+                            path, mount.caller, name, pc)
                     except dwarf_local.ResolveError as error:
                         raise ValueError(str(error)) from error
+            continue
+        if mount.caller and 'local("' in mount.body:
+            info = module_base(pid, mount.module, executable)
+            if info is None:
+                raise ValueError('cannot find module for caller locals')
+            module_name, base, path = info
+            try:
+                callsite = dsl_x86.resolve_callsite(
+                    path, mount.caller, mount.symbol, nm=nm)
+            except dsl_x86.ResolveError as error:
+                raise ValueError(str(error)) from error
+            pc = base + callsite
+            for name in __import__('re').findall(r'local\("([^"]+)"\)', mount.body):
+                try:
+                    mount.local_recipes[name] = dwarf_local.resolve_local(
+                        path, mount.caller, name, pc)
+                except dwarf_local.ResolveError as error:
+                    raise ValueError(str(error)) from error
             continue
         binary = None
         if mount.module:
