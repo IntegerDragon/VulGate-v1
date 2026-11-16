@@ -1,4 +1,4 @@
-﻿"""Compile the patch DSL to VulGate Shadow-VM bytecode.
+"""Compile the patch DSL to VulGate Shadow-VM bytecode.
 
 The DSL behavior accepted here is the subset used by the 20 quick-block
 patches: selector assignments (`value["x"] = ...;`) followed by one
@@ -221,7 +221,10 @@ class Assembler:
              target: str | None = None) -> None:
         if target is not None:
             self.fixups.append((len(self.code), target))
-        self.code.append([op, ((src & 0xF) << 4) | (dst & 0xF), 0, int(imm) & 0xFFFFFFFF])
+        raw = int(imm) & 0xFFFFFFFF
+        if raw >= 0x80000000:
+            raw -= 0x100000000
+        self.code.append([op, ((src & 0xF) << 4) | (dst & 0xF), 0, raw])
 
     def jump(self, target: str) -> None:
         self.emit(OP_JA, target=target)
