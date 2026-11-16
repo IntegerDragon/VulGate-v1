@@ -4,7 +4,7 @@ Input:  build/declarative20-specs/{cases/*/patch.yaml, app_profiles/*.yaml}
 Output: runtime/dsl/patches/<case>.vg
 
 This converter is intentionally one-way (spec -> DSL).  The DSL is the patch
-input consumed by runtime/dsl/compiler.py; the original YAML remains available
+input consumed by the DSL→VM compiler; the original YAML remains available
 for reference.
 """
 from __future__ import annotations

@@ -267,14 +267,6 @@ python -m runtime.dsl.run --dsl patch.vg --pid 1234 \
     --bridge-dir build/frida-vm
 ```
 
-### 3.5 保留 JS 后端（对照用）
-
-```sh
-python -m runtime.dsl.run --dsl patch.vg --pid 1234 --backend js
-```
-
-JS 后端现在只作为对照/应急路径；默认是 VM。
-
 ---
 
 ## 4. 20 个 CVE 补丁
@@ -288,7 +280,7 @@ JS 后端现在只作为对照/应急路径；默认是 VM。
   - `CVE-2026-42945` / `9256` → `ngx_http_rewrite_handler` 返回 500；
 - `CVE-2026-111497` 已恢复原始 observer 语义：callsite observer + `local("available_in")`
   + 动态 key `arg0` + `map_present` / `map_take`；用合成 brotli fixture 单独验证；
-- 分析见 `docs/ai/DSL_RETURN_ONLY_ANALYSIS.md`。
+- 分析已并入当前 README 的补丁状态说明；
 
 ### 合成 fixture VM 验证
 
@@ -338,8 +330,7 @@ runtime/vm.c        Shadow VM（eBPF 子集、只读判定）
 runtime/frida/      Frida bridge/agent、多进程、metrics/控制通道
 runtime/native/     plthook / inline 原生后端（实验）
 runtime/preload/    LD_PRELOAD 原生模式
-tests/              DSL VM/JS、Frida、native、baseline 测试
-docs/ai/            设计、限制、真实重放记录
+tests/              DSL VM、Frida、native、baseline 测试
 deploy/             systemd/权限说明
 ```
 

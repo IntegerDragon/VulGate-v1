@@ -1,7 +1,7 @@
 ﻿"""LD_PRELOAD deployment mode: generate a native interposition library.
 
 Frida's replacement callbacks cannot serve non-main threads on this platform
-(see docs/ai/FRIDA_THREAD_SAFETY.md). For dynamically linked targets we load a
+For dynamically linked targets we load a
 small native library instead: it defines the patched symbols, runs the in-tree
 eBPF VM (statically linked `runtime/vm.c`), reads thread-scoped observation maps
 from generated wrappers, and calls the real symbol through

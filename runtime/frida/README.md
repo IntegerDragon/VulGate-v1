@@ -26,7 +26,7 @@ Windows 可以通过 `--cc C:/msys64/mingw64/bin/gcc.exe` 指定编译器。
 测试只运行 `tests/workloads/userspace/frida/fixture.c`：它计算整数并增加函数体计数器。
 
 2026-11-11 实测：Frida 17.26.2，Windows 11 x64 与 Ubuntu 24.04 / WSL2 x64
-各通过 10 项测试。详细过程见 `docs/ai/FRIDA_BACKEND_VALIDATION.md`。
+各通过 10 项测试。
 
 ## 挂载
 
@@ -112,7 +112,7 @@ python -m runtime.frida.run --pid PID --check-only --manifest M --catalog C
 python -m runtime.frida.multiproc --exe /usr/sbin/nginx --check-only --manifest M --catalog C
 ```
 
-退出码：0 通过、2 参数错误、3 bundle 无效、4 挂点不可挂、5 权限/注入失败、6 目标不匹配、7 部分失败、8 已安装、9 smoke 未生效。错误码表见 `docs/ai/PATCH_INSTALL_NEXT_STEPS.md`。
+退出码：0 通过、2 参数错误、3 bundle 无效、4 挂点不可挂、5 权限/注入失败、6 目标不匹配、7 部分失败、8 已安装、9 smoke 未生效。错误码见上。
 
 ## 生效自证
 
@@ -143,7 +143,7 @@ python runtime/frida/cli.py metrics   --socket /run/vulgate.sock
 python runtime/frida/cli.py uninstall --socket /run/vulgate.sock [--pid N]
 ```
 
-平台/权限/语言边界见 `docs/ai/PLATFORM_AND_LIMITS.md`，systemd 与容器部署示例见 `deploy/`。
+平台/权限/语言边界见 `deploy/`，systemd 与容器部署示例见 `deploy/`。
 
 
 
