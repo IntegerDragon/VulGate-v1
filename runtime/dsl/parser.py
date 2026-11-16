@@ -58,6 +58,11 @@ class MountSpec:
     nature: str
     body: str
     offset: int | None = None
+    location_kind: str = 'symbol'
+    caller: str | None = None
+    callee: str | None = None
+    file: str | None = None
+    line: int | None = None
 
 
 @dataclass
@@ -150,6 +155,56 @@ def _split_fields(body: str) -> dict[str, str]:
         value = match.group(2).strip()
         fields[key] = value
     return fields
+
+
+def _split_commas(value: str) -> list[str]:
+    pieces: list[str] = []
+    current: list[str] = []
+    depth = 0
+    in_string = None
+    for char in value:
+        if in_string:
+            current.append(char)
+            if char == in_string:
+                in_string = None
+        elif char in ('"', "'"):
+            in_string = char
+            current.append(char)
+        elif char in '([':
+            depth += 1
+            current.append(char)
+        elif char in ')]':
+            depth -= 1
+            current.append(char)
+        elif char == ',' and depth == 0:
+            pieces.append(''.join(current))
+            current = []
+        else:
+            current.append(char)
+    pieces.append(''.join(current))
+    return [piece.strip() for piece in pieces if piece.strip()]
+
+
+def _parse_call_location(text: str) -> tuple[str, dict]:
+    match = re.match(r'^(callsite|line|address)\s*\((.*)\)\s*$', text, re.S)
+    if not match:
+        raise DSLParseError('invalid location call')
+    kind, inner = match.group(1), match.group(2)
+    attrs = {}
+    for part in _split_commas(inner):
+        if '=' not in part:
+            raise DSLParseError('location attribute needs name=value: ' + part)
+        key, value = part.split('=', 1)
+        key = key.strip()
+        value = value.strip()
+        if key in ('args', 'arg_types'):
+            attrs[key] = [item.strip().strip('"\'')
+                          for item in value.strip('[]').split(',') if item.strip()]
+        elif key == 'line':
+            attrs[key] = int(value, 0)
+        else:
+            attrs[key] = value.strip('"\'')
+    return kind, attrs
 
 
 def _parse_location(text: str) -> tuple[str | None, str, list[str], str, int | None]:
@@ -250,7 +305,24 @@ def parse(text: str) -> PatchSpec:
         location = fields.get('位置', fields.get('location'))
         if not location:
             raise DSLParseError(f'mount {identifier} has no 位置')
-        module, symbol, args, return_type, offset = _parse_location(location)
+        location = location.strip()
+        location_kind = 'symbol'
+        caller = callee = file_name = None
+        line = None
+        if re.match(r'^(callsite|line|address)\s*\(', location):
+            location_kind, attrs = _parse_call_location(location)
+            module = attrs.get('module')
+            caller = attrs.get('caller')
+            callee = attrs.get('callee')
+            file_name = attrs.get('file')
+            line = attrs.get('line')
+            symbol = attrs.get('symbol') or caller or file_name or ''
+            args = attrs.get('args') or []
+            return_type = attrs.get('return') or 'int'
+            offset = attrs.get('offset')
+            offset = int(offset, 0) if isinstance(offset, str) else offset
+        else:
+            module, symbol, args, return_type, offset = _parse_location(location)
         nature = fields.get('性质', fields.get('nature', '拦截点')).strip()
         if nature not in ('拦截点', '读取点', 'intercept', 'read', 'read_point'):
             raise DSLParseError(f'mount {identifier} has invalid 性质: {nature}')
@@ -265,7 +337,10 @@ def parse(text: str) -> PatchSpec:
         if not behavior_match:
             raise DSLParseError(f'mount {identifier} has no 行为')
         behavior, _ = _find_block(block, behavior_match.end())
-        mounts.append(MountSpec(identifier, module, symbol, args, return_type, nature, behavior, offset))
+        mounts.append(MountSpec(
+            identifier, module, symbol, args, return_type, nature, behavior, offset,
+            location_kind=location_kind, caller=caller, callee=callee,
+            file=file_name, line=line))
     if not mounts:
         raise DSLParseError('DSL has no 挂载点')
     return PatchSpec(actions, mounts, maps)

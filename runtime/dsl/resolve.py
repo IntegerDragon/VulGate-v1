@@ -1,4 +1,4 @@
-"""Resolve missing `location.offset` values for a running or spawned target.
+﻿"""Resolve missing `location.offset` values for a running or spawned target.
 
 DSL mounts normally name a symbol.  Exported symbols can be resolved by Frida
 at install time, but local/static symbols (common in nginx/httpd) are not in
@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 from runtime.frida import symbols as frida_symbols  # noqa: E402
 from runtime.dsl import parser as dsl_parser  # noqa: E402
+from runtime.dsl import x86 as dsl_x86  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,22 @@ def resolve_patch(patch: dsl_parser.PatchSpec, pid: int | None = None,
     for mount in patch.mounts:
         if mount.offset is not None:
             continue
+        if mount.location_kind in ('callsite', 'line'):
+            info = module_base(pid, mount.module, executable)
+            if info is None:
+                raise ValueError('cannot find module for location')
+            module_name, base, path = info
+            try:
+                if mount.location_kind == 'callsite':
+                    mount.offset = dsl_x86.resolve_callsite(
+                        path, mount.caller, mount.callee, mount.line, mount.file, nm=nm)
+                else:
+                    mount.offset = dsl_x86.resolve_line(
+                        path, mount.file, mount.line)
+            except dsl_x86.ResolveError as error:
+                raise ValueError(str(error)) from error
+            mount.module = module_name
+            continue
         binary = None
         if mount.module:
             base = Path(mount.module).name
@@ -170,7 +187,7 @@ def module_base(pid: int | None, module_name: str | None = None,
                     bias = frida_symbols.load_bias(Path(path)) or 0
                 except OSError:
                     bias = 0
-                return (Path(path).name, start - bias, Path(path))
+                return (Path(path).name, start, Path(path))
     if main is not None:
         for start, path in candidates:
             if Path(path) == main or Path(path).name == main.name:
@@ -178,7 +195,7 @@ def module_base(pid: int | None, module_name: str | None = None,
                     bias = frida_symbols.load_bias(main) or 0
                 except OSError:
                     bias = 0
-                return (main.name, start - bias, main)
+                return (main.name, start, main)
     if candidates:
         start, path = candidates[0]
         return (Path(path).name, start, Path(path))
@@ -196,3 +213,4 @@ def resolve_global(name: str, pid: int | None, module_name: str | None,
     if offset is None:
         raise ValueError('global symbol not found: ' + name)
     return (module, base + offset)
+

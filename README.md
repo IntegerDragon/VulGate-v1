@@ -75,7 +75,7 @@ mount demo:
 | `return_type` / `return` | 动作返回类型/值 |
 | `errno` | 可选 |
 | `mount <id>` | 挂载点 |
-| `location` | `module`、`symbol`、`offset`、`args`、`return` |
+| `location` | `symbol`/`offset`，以及 `callsite(...)`、`line(...)`、`address(...)` |
 | `nature` | `intercept` / `read_point` |
 | `behavior` | C 风格行为代码 |
 
@@ -164,7 +164,44 @@ if (arg1 > value["limit"]) {
 - action writes；
 - 调用点/callsite observer（只支持函数入口观察点）。
 
-### 2.4 自动补 offset
+### 2.4 位置解析（x86-64）
+
+DSL 不需要显式写 offset，可以直接描述位置：
+
+```text
+location: callsite(caller="BrotliDecoderDecompressStream",
+                   callee="WriteRingBuffer", line=2426)
+
+location: line(file="decode.c", line=2426)
+
+location: address(module="libpd_brotli.so", offset=0x1234)
+```
+
+解析流程（`runtime/dsl/x86.py`）：
+
+1. 用 `nm -S` 得到 caller/callee 的符号地址与函数范围；
+2. `objdump -d` 反汇编 caller，找 `call callee` 指令；
+3. 若给 `line/file`，用 `addr2line` 过滤；
+4. 用 DWARF decoded line 支持 `line(file,line)`；
+5. 输出 module-relative offset，安装时 `module.base + offset`。
+
+callsite observer 验证：
+
+```text
+location: callsite(caller="caller", callee="callee")
+```
+
+用户态 fixture 结果：
+
+```text
+callsite offset 0x11fb, target 0x4011fb
+guard target 0x4011b6
+result body_calls=0（callsite observer 写入 map，callee 被 BLOCK）
+```
+
+当前只适配 **x86-64 Linux**；PLT/内联调用解析有限。
+
+### 2.5 自动补 offset
 
 `runtime/dsl/resolve.py`：
 
@@ -174,7 +211,7 @@ if (arg1 > value["limit"]) {
 4. 对 `--spawn`：Frida 先挂起目标，maps 可用后再编译/安装；
 5. `global("x")` 同样解析成绝对地址常量。
 
-### 2.5 安装（`runtime/dsl/vm_run.py`）
+### 2.6 安装（`runtime/dsl/vm_run.py`）
 
 - 编译 bridge：`vulgate_frida.so`（含 `runtime/vm.c`）；
 - 为每个 mount：
@@ -286,7 +323,8 @@ deploy/             systemd/权限说明
 ## 6. 当前限制
 
 - VM 只读，不支持 action writes（写字段需后续两阶段 action）；
-- DSL → VM 目前只支持 20 例子集：无循环、无 callsite observer；
+- DSL → VM 目前只支持 20 例子集：无循环、callsite 仅解析直接 call（PLT/内联有限）；
+- 位置解析只适配 x86-64 Linux；
 - map 只支持编译期字面量 key（运行时字符串 key 未支持）；
 - Frida 回调仍只适合单线程路径；
 - 没有常驻 daemon / uninstall 子命令；

@@ -1,0 +1,33 @@
+map limits:
+{
+    capacity: 16
+}
+
+action BLOCK:
+{
+    return_type: void
+    return: 0
+}
+
+mount observe_callsite:
+{
+    location: callsite(caller="caller", callee="callee")
+    nature: read_point
+    behavior:
+    {
+        map["limits"]["available_in"] = arg1;
+    }
+}
+
+mount guard_callee:
+{
+    location: symbol="callee", args=[uint64, uint64], return=void
+    nature: intercept
+    behavior:
+    {
+        value["available_in"] = map["limits"]["available_in"];
+        if (arg1 > 50) {
+            return block("BLOCK");
+        }
+    }
+}

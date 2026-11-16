@@ -66,6 +66,33 @@ mount observe_limit:
 - 字符串 key 在编译期映射为 per-map 的 `u64` key id；
 - VM helper：`MAP_SET(9)` / `MAP_GET(10)` / `MAP_PRESENT(11)` / `MAP_DELETE(12)`。
 
+## 位置解析（x86-64）
+
+DSL 不需要写 offset：
+
+```text
+location: callsite(caller="caller", callee="callee", line=18)
+location: line(file="fixture.c", line=18)
+location: address(module="libfoo.so", offset=0x1234)
+```
+
+`runtime/dsl/x86.py`：
+
+1. `nm -S` 取 caller/callee 符号地址和函数范围；
+2. `objdump -d` 找 caller 内的 `call callee`；
+3. `addr2line` 按源码行过滤；
+4. `objdump --dwarf=decodedline` 支持 `line(file,line)`；
+5. 返回 module-relative offset，安装时加 `module.base`。
+
+callsite observer 用户态验证：
+
+```sh
+python -m runtime.dsl.vm_callsite_validate
+```
+
+结果：callsite offset `0x11fb`、target `0x4011fb`，observer 写 map，
+callee guard BLOCK，fixture `body_calls=0`。
+
 ## 验证
 
 ```sh
@@ -86,7 +113,8 @@ python -m runtime.dsl.vm_map_validate
 ## 限制
 
 - VM 只读，action writes 未实现；
-- DSL→VM 目前支持 20 例子集：无循环、无 callsite observer；
+- DSL→VM 目前支持 20 例子集：无循环；callsite 仅解析直接 call；
+- 位置解析只适配 x86-64 Linux；
 - map 只支持编译期字面量 key；
 - Frida 回调仍只适合单线程；
 - 自动 offset 依赖可读 ELF + `nm`。
