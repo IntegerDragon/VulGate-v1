@@ -178,7 +178,7 @@ map["current_input"][arg0] = local("available_in");
 当前编译支持 20 个快速拦截补丁所需的子集；不支持：
 - 有界循环/任意临时变量（可后续加 lowering）；
 - action writes；
-- 调用点/callsite observer（只支持函数入口观察点）。
+- 调用点/callsite observer：支持函数入口 observer 和直接 `call` 的 callsite observer；间接/内联调用解析有限。
 
 ### 2.4 位置解析（x86-64）
 
