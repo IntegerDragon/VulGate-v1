@@ -211,7 +211,7 @@ def main() -> int:
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case', action='append', default=[])
-    parser.add_argument('--repeat', type=int, default=2)
+    parser.add_argument('--repeat', type=int, default=5)
     parser.add_argument('--json', type=Path, default=None)
     args = parser.parse_args()
     directory = Path(tempfile.mkdtemp(prefix='dsl-bench-'))
@@ -263,6 +263,7 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
 
 
 

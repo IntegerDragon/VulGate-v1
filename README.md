@@ -337,8 +337,9 @@ deploy/             systemd/权限说明
 
 ## 6. 当前限制
 
-- VM 只读，不支持 action writes（写字段需后续两阶段 action）；
-- DSL → VM 目前只支持 20 例子集：无循环、callsite 仅解析直接 call（PLT/内联有限）；
+性能方法和结果见 [`PERFORMANCE.md`](PERFORMANCE.md)。
+
+- VM 只读，不支持 action writes（写字段需后续两阶段 action）；- DSL → VM 目前只支持 20 例子集：无循环、callsite 仅解析直接 call（PLT/内联有限）；
 - 位置解析只适配 x86-64 Linux；
 - map 支持编译期字面量 key 和动态 u64 key；运行时字符串 key 还未支持；
 - map 仍是程序级全局，没有 thread-scoped 分片；
