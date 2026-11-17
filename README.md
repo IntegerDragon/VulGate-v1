@@ -20,8 +20,6 @@ Frida bridge（vulgate_frida.so）
 
 > 输入一个 DSL 补丁，编译成 VM 字节码，自动解析符号和位置，安装到真实进程，并由 VM 返回 PASS/BLOCK。
 
-本 README 只描述 `main` 上的 **DSL → Shadow VM → Frida** 主链。
-
 独立 `libffi + funchook` 原型在当前仓库的 `ffi-backend` 分支，尚未合入 `main`。
 
 ---
@@ -517,12 +515,9 @@ CVE-2026-42945 / CVE-2026-9256:
 
 ## 5. DSL → VM → Frida 性能
 
-以下数据只来自真实 nginx，不使用合成 fixture。
-
 测试环境：
 
 ```text
-host: qizhi-51, Linux x86-64
 nginx: 1.31.6, master_process off
 injector: Frida 17.26.2 / Python 3.12
 请求: GET /rewrite/ordinary
@@ -561,6 +556,37 @@ p99:  98.76 ms → 103.13 ms
 - 当前未做 CPU 绑核。
 
 更完整结果见 [`PERFORMANCE.md`](PERFORMANCE.md)。
+
+### 5.1 补丁安装耗时
+
+同一 nginx 进程、已有 `build/frida-vm/vulgate_frida.so`、`CVE-2026-42945`：
+
+```text
+resolve + compile（5 次）:
+  median 27.75 ms
+  min    26.05 ms
+  max    48.70 ms
+
+CLI 端到端安装（5 次）:
+  0.50–0.52 s
+  median 0.51 s
+```
+
+说明：
+
+- `resolve + compile` 是纯 Python 的 DSL 解析、符号/地址解析和字节码编译；
+- CLI 端到端还包括 Python 启动、Frida attach、bridge 加载和 detach；
+- 测试使用 `--duration 0.1`，不是长驻安装。
+
+安装耗时命令：
+
+```sh
+/usr/bin/time -f '%e' \
+  python -m runtime.dsl.run \
+  --pid <pid> \
+  --dsl runtime/dsl/patches/CVE-2026-42945.vg \
+  --duration 0.1
+```
 
 ---
 
