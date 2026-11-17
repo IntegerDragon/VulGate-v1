@@ -338,7 +338,52 @@ local("name")
 逻辑 && || !
 ```
 
-### 3.4 map / observer / caller local
+### 3.4 有界 for 循环
+
+支持固定上界的计数循环：
+
+```text
+for (i = 0; i < 4; i++) {
+    map["seen"][i] = 1;
+}
+```
+
+约束：
+
+- 上界必须是编译期常量；
+- `0 < 迭代次数 <= 256`；
+- 目前只支持 `i++`、从 0 开始；
+- 不支持嵌套循环；
+- 循环变量可用于 map key/表达式；
+- 循环体内目前支持 map 赋值，不支持任意局部变量/action writes。
+
+VM 侧不是简单展开，而是生成官方 eBPF 风格的有界后向跳转：
+
+```text
+<set loop var>
+MOV  r10, count
+L:  <body>
+    <increment loop var>
+    SUB  r10, 1
+    JGT  r10, 0, L
+```
+
+`runtime/vm.c` 的 `validate_bounded_backedge()` 会检查：
+
+- 初始化必须是合法常量；
+- 循环末尾必须是 `SUB 1` + `JGT 0`；
+- 循环体不能修改计数寄存器；
+- 只允许这一种受控后向跳转。
+
+VM 还有 `SHADOW_DEFAULT_STEP_LIMIT` 指令预算，作为第二层死循环保护。
+
+验证：
+
+```sh
+python -m runtime.dsl.vm_loop_validate
+```
+
+### 3.5 map / observer / caller local
 
 map 声明：
 
@@ -593,6 +638,7 @@ CLI 端到端安装（5 次）:
 ## 6. 当前限制
 
 - VM 只读，不支持 action writes；
+- `for` 只支持固定常量上界、从 0 开始、`i++`，不支持嵌套循环/while/任意局部变量；
 - callsite 目前只解析直接 `call`，PLT/内联调用有限；
 - 位置解析只适配 x86-64 Linux；
 - `local()` 只支持 DWARF exprloc，loclist 未实现；
