@@ -528,14 +528,15 @@ patched:  result=0, error=-9, produced=0
 | 16 | CVE-2026-93546 | httpd | `dav_method_proppatch` | 已验证：PROPPATCH 207 → 503 |
 | 17 | CVE-2026-97205 | nginx | `ngx_http_copy_filter` | 已命中；请求条件未触发 |
 | 18 | CVE-2026-109618 | PHP | `rfc1867_post_handler` | 已验证：multipart 解析被阻断 |
-| 19 | CVE-2026-109619 | PHP | `php_session_rfc1867_callback` | **未通过**：action 0 不关闭 progress |
+| 19 | CVE-2026-109619 | PHP | `php_session_rfc1867_callback` | 已验证：fresh session 下 files 正常、progress=false |
 | 20 | CVE-2026-111497 | brotli | callsite → `WriteRingBuffer` | 已验证：error=-9 |
 
 说明：
 
 - 20 个 patch 都已经完成过安装；
 - 上表“已验证”只表示在当前真实应用路径上观察到了预期效果；
-- `93479`、`109619` 仍未通过；
+- `93479` 仍未通过；`109619` 在 fresh session 下已验证通过；
+- 验证 109619 时必须使用新的 `PHPSESSID`（或开启 `session.upload_progress.cleanup`），否则会读到同一 session 上一次请求遗留的 progress，误判为未生效；
 - `15176`、`47360`、`60005`、`97205` 的 guard 已挂载/命中，但当前请求没有触发其阻断条件，因此不能算“已验证阻断”；
 - `42533` 的 guard 已执行 BLOCK，但该函数的返回 -1 没有改变 HTTP 200 结果，不能算 HTTP 层已验证阻断。
 
@@ -649,9 +650,9 @@ CLI 端到端安装（5 次）:
 - 真实应用行为覆盖仍不完整：
   - nginx：部分 patch；
   - httpd：部分 patch；
-  - PHP：109618 通过，109619 未通过；
+  - PHP：109618 通过，109619 在 fresh session 下通过；
   - brotli：111497 通过；
-- 93479 / 109619 当前仍未通过；
+- 93479 当前仍未通过；
 - 15176 / 47360 / 60005 / 97205 的条件请求还没有全部构造完成；
 - 42533 的 BLOCK 已执行，但 HTTP 层没有观察到阻断效果。
 
