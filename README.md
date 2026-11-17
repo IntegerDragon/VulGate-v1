@@ -535,7 +535,10 @@ patched:  result=0, error=-9, produced=0
 
 - 20 个 patch 都已经完成过安装；
 - 上表“已验证”只表示在当前真实应用路径上观察到了预期效果；
-- `93479` 仍未通过；`109619` 在 fresh session 下已验证通过；
+- `93479` 仍未通过；
+- `109619` 在 fresh session 下已验证通过；
+- `93479` 的 coarse 替代版本在 `runtime/dsl/patches_alt/CVE-2026-93479-rewrite.vg`：
+  hook `ngx_http_rewrite_handler`，返回 500，不需要 action writes；已验证真实 nginx 500，但粒度比官方 check_length 条件粗；
 - 验证 109619 时必须使用新的 `PHPSESSID`（或开启 `session.upload_progress.cleanup`），否则会读到同一 session 上一次请求遗留的 progress，误判为未生效；
 - `15176`、`47360`、`60005`、`97205` 的 guard 已挂载/命中，但当前请求没有触发其阻断条件，因此不能算“已验证阻断”；
 - `42533` 的 guard 已执行 BLOCK，但该函数的返回 -1 没有改变 HTTP 200 结果，不能算 HTTP 层已验证阻断。
