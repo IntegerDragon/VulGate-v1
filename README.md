@@ -506,6 +506,8 @@ patched:  result=0, error=-9, produced=0
 
 ## 4. 选用的 20 个漏洞补丁
 
+细粒度候选、Shadow VM 回归用例和安装核对项见 [细粒度 DSL 补丁与安装交接](runtime/dsl/patches_fine/README.md)。
+
 当前 `runtime/dsl/patches/` 中选了以下 20 个 CVE：
 
 | # | 漏洞 | 应用 | 挂载函数 | 当前验证状态 |
