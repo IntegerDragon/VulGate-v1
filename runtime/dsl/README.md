@@ -37,7 +37,7 @@ python -m runtime.dsl.run --dsl patch.vg --spawn ./target --duration 30
 - 比较/逻辑/算术 → 条件跳转/ALU；
 - BLOCK 后由安装器执行 action 返回值，PASS 调原函数。
 
-## 函数入口状态修复
+## 标志位修复
 
 `repair_point` 用于上游修复只需更新函数参数里的标志位、随后继续原函数的场景。
 
@@ -54,7 +54,11 @@ mount example:
 }
 ```
 
-安装器先比对主程序 ELF Build ID，再用 Frida 的函数入口回调清除一个字节中掩码指定的位。其他位与相邻字段保留，原函数照常执行。`clear_arg_u8` 接受参数列表中声明的 `pointer`，字节偏移范围为 `0..4095`，掩码范围为 `1..255`。每个修复点只有一次位清除。已核对的模块相对入口偏移可以写在 `location.offset`，支持对应的 stripped 构建。
+安装器先比对主程序 ELF Build ID，再用 Frida 更新一个字节中掩码指定的位。其他位与相邻字段保留，原程序照常执行。每个修复点执行一次操作，字节偏移范围为 `0..4095`，掩码范围为 `1..255`。
+
+- 函数入口支持 `clear_arg_u8(argN, offset, mask)`，参数须声明为 `pointer`。已核对的模块相对入口偏移可以写在 `location.offset`，支持对应的 stripped 构建。
+- x86-64 指令位置使用 `address(symbol="...", offset=...)`。支持 `set_reg_u8(reg, offset, mask)`、`clear_reg_u8(reg, offset, mask)` 和 `copy_reg_u8(dst, dst_offset, src, src_offset, mask)`。寄存器名限于 `rbx`、`rbp`、`rsp`、`r12` 到 `r15`。寄存器提供内存基址，指令照常执行。
+- 配置编译所需的修复点声明 `requires_spawn: true`。此类补丁用 `--spawn` 在恢复目标进程前挂载。需要传程序参数时逐个使用 `--spawn-arg=<参数>`。
 
 修复动作由安装器执行。Shadow VM 的拦截判定仍只读。运行结果在 `run` 中报告 `repaired`、`repair-unneeded`、`repair-skipped-null` 或 `repair-error`。构建不匹配时安装在挂载前失败。
 
@@ -144,7 +148,7 @@ python -m runtime.dsl.vm_93479_validate
 
 ## 限制
 
-- VM 只读，安装器的状态修复限于 `repair_point` 的参数标志位清除；
+- VM 只读，安装器的状态修复限于 `repair_point` 的单字节掩码操作；
 - DSL→VM 目前支持 20 例子集：无循环；callsite 仅解析直接 call；
 - 位置解析只适配 x86-64 Linux；
 - map 支持字面量/动态 u64 key；运行时字符串 key 未支持；

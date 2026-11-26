@@ -49,10 +49,13 @@ class ActionSpec:
 
 
 @dataclass(frozen=True)
-class FlagClearSpec:
-    argument: int
+class FlagRepairSpec:
+    operation: str
+    base: int | str
     offset: int
     mask: int
+    source_register: str | None = None
+    source_offset: int = 0
 
 
 @dataclass
@@ -72,7 +75,8 @@ class MountSpec:
     line: int | None = None
     local_recipes: dict = field(default_factory=dict)
     build_id: str | None = None
-    flag_clear: FlagClearSpec | None = None
+    flag_repair: FlagRepairSpec | None = None
+    requires_spawn: bool = False
 
 
 @dataclass
@@ -293,18 +297,42 @@ def _parse_action(identifier: str, body: str) -> ActionSpec:
     return spec
 
 
-def _parse_flag_clear(body: str, args: list[str]) -> FlagClearSpec:
-    number = r'(0[xX][0-9a-fA-F]+|[0-9]+)'
-    match = re.fullmatch(rf'\s*clear_arg_u8\(\s*arg([0-5])\s*,\s*{number}\s*,\s*{number}\s*\)\s*;\s*', body)
-    if match is None:
-        raise DSLParseError('repair_point needs exactly one clear_arg_u8(argN, offset, mask)')
-    index, offset, mask = (int(text, 16 if text.lower().startswith('0x') else 10)
-                           for text in match.groups())
-    if index >= len(args) or args[index] != 'pointer':
-        raise DSLParseError('clear_arg_u8 requires a declared pointer argument')
-    if not 0 <= offset <= 4095 or not 1 <= mask <= 255:
-        raise DSLParseError('clear_arg_u8 offset must be 0..4095 and mask 1..255')
-    return FlagClearSpec(index, offset, mask)
+_REPAIR_OPERATIONS = {'clear_arg_u8': 'clear', 'clear_reg_u8': 'clear',
+                      'set_reg_u8': 'set', 'copy_reg_u8': 'copy'}
+_REPAIR_REGISTERS = {'rbx', 'rbp', 'rsp', 'r12', 'r13', 'r14', 'r15'}
+
+
+def _parse_flag_repair(body: str, args: list[str], location_kind: str) -> FlagRepairSpec:
+    match = re.fullmatch(r'\s*(\w+)\(([^()]*)\)\s*;\s*', body)
+    if match is None or match[1] not in _REPAIR_OPERATIONS:
+        raise DSLParseError('repair_point needs exactly one supported byte-mask operation')
+    name = match[1]
+    operation = _REPAIR_OPERATIONS[name]
+    operands = [part.strip() for part in match[2].split(',')]
+    if len(operands) != (5 if operation == 'copy' else 3):
+        raise DSLParseError('wrong number of operands for ' + name)
+
+    base = operands[0]
+    source = operands[2] if operation == 'copy' else None
+    if name == 'clear_arg_u8':
+        if location_kind != 'symbol' or not re.fullmatch(r'arg[0-5]', base):
+            raise DSLParseError('clear_arg_u8 requires a function-entry pointer argument')
+        base = int(base[3:])
+        if base >= len(args) or args[base] != 'pointer':
+            raise DSLParseError('clear_arg_u8 requires a declared pointer argument')
+    elif (location_kind != 'address' or base not in _REPAIR_REGISTERS or
+          (source is not None and source not in _REPAIR_REGISTERS)):
+        raise DSLParseError('register repair requires an address and supported x86-64 registers')
+
+    try:
+        offset = int(operands[1], 0)
+        mask = int(operands[-1], 0)
+        source_offset = int(operands[3], 0) if source is not None else 0
+    except ValueError as exc:
+        raise DSLParseError('byte-mask operands must use integer offsets and mask') from exc
+    if not 0 <= offset <= 4095 or not 0 <= source_offset <= 4095 or not 1 <= mask <= 255:
+        raise DSLParseError('repair offset must be 0..4095 and mask 1..255')
+    return FlagRepairSpec(operation, base, offset, mask, source, source_offset)
 
 
 def parse(text: str) -> PatchSpec:
@@ -368,20 +396,28 @@ def parse(text: str) -> PatchSpec:
             raise DSLParseError(f'mount {identifier} has no 行为')
         behavior, _ = _find_block(block, behavior_match.end())
         build_id = fields.get('build_id')
-        flag_clear = None
+        requires_spawn = fields.get('requires_spawn')
+        flag_repair = None
         if nature == 'repair_point':
-            if location_kind != 'symbol' or module or caller or (offset is not None and offset < 0):
-                raise DSLParseError('repair_point requires a function entry in the main executable')
+            if (location_kind not in ('symbol', 'address') or module or caller or
+                    (offset is not None and offset < 0) or
+                    (location_kind == 'address' and offset is None)):
+                raise DSLParseError('repair_point requires a function or explicit address in the main executable')
             if not build_id or not re.fullmatch(r'[0-9a-fA-F]{40}', build_id.strip('"\'')):
                 raise DSLParseError('repair_point requires a 40-digit hexadecimal build_id')
             build_id = build_id.strip('"\'').lower()
-            flag_clear = _parse_flag_clear(behavior, args)
+            if requires_spawn not in (None, 'true', 'false'):
+                raise DSLParseError('requires_spawn must be true or false')
+            flag_repair = _parse_flag_repair(behavior, args, location_kind)
         elif build_id is not None:
             raise DSLParseError('build_id is supported on repair_point only')
+        elif requires_spawn is not None:
+            raise DSLParseError('requires_spawn is supported on repair_point only')
         mounts.append(MountSpec(
             identifier, module, symbol, args, return_type, nature, behavior, offset,
             location_kind=location_kind, caller=caller, callee=callee,
-            file=file_name, line=line, build_id=build_id, flag_clear=flag_clear))
+            file=file_name, line=line, build_id=build_id, flag_repair=flag_repair,
+            requires_spawn=requires_spawn == 'true'))
     if not mounts:
         raise DSLParseError('DSL has no 挂载点')
     return PatchSpec(actions, mounts, maps)

@@ -1,9 +1,11 @@
 import ctypes
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -298,6 +300,7 @@ def test_regex_reallocation_guard_preserves_unrelated_calls(
 
 
 REWRITE_REPAIR = FINE_PATCHES / 'CVE-2026-42945.vg'
+REWRITE_LENGTH_REPAIR = FINE_PATCHES / 'CVE-2026-9256.vg'
 
 
 @pytest.mark.parametrize(('source', 'replacement', 'error'), [
@@ -377,5 +380,92 @@ void rewrite_end(unsigned char *engine)
         status = script.exports_sync.status()
         assert status['run'][mount.id] == 'repair-skipped-null'
         assert status['hits'][mount.id] == 3
+    finally:
+        session.detach()
+
+
+@pytest.mark.parametrize(('source', 'replacement', 'error'), [
+    ('offset=0xdd73c', '', 'explicit address'),
+    ('rsp, 0xb0', 'rax, 0xb0', 'supported x86-64 registers'),
+    ('rbp, 64', 'rbp, 4096', 'offset must be'),
+    ('requires_spawn: true', 'requires_spawn: yes', 'true or false'),
+])
+def test_repair_point_validates_instruction_metadata(source, replacement, error):
+    text = REWRITE_LENGTH_REPAIR.read_text(encoding='utf-8').replace(source, replacement)
+    with pytest.raises(parser.DSLParseError, match=error):
+        parser.parse(text)
+
+
+def test_rewrite_length_repair_requires_spawn(tmp_path):
+    with pytest.raises(ValueError, match='requires --spawn'):
+        vm_run.install(REWRITE_LENGTH_REPAIR, 123, None, tmp_path)
+
+
+def test_rewrite_spawn_preserves_arguments_and_cleans_failed_install(tmp_path, monkeypatch):
+    events = []
+    device = SimpleNamespace(spawn=lambda argv: events.append(argv) or 123,
+                             kill=lambda pid: events.append(pid))
+    monkeypatch.setitem(sys.modules, 'frida', SimpleNamespace(get_local_device=lambda: device))
+    monkeypatch.setattr(vm_run.dsl_resolve, 'resolve_patch', lambda *args, **kwargs: None)
+
+    def reject_target(*_args):
+        raise ValueError('Build ID mismatch')
+
+    monkeypatch.setattr(vm_run, '_target_address', reject_target)
+    executable = tmp_path / 'nginx'
+    with pytest.raises(ValueError, match='Build ID mismatch'):
+        vm_run.install(REWRITE_LENGTH_REPAIR, None, executable, tmp_path, spawn=True,
+                       spawn_args=['-c', '/tmp/nginx.conf'])
+    assert events == [[str(executable.resolve()), '-c', '/tmp/nginx.conf'], 123]
+
+
+def test_9256_repairs_compiler_and_live_script_state(request, tmp_path):
+    frida = pytest.importorskip('frida')
+    if sys.platform not in ('linux', 'win32') or platform.machine().lower() not in ('x86_64', 'amd64'):
+        pytest.skip('instruction fixture uses Linux or Windows x86-64 assembly')
+    native_bridge = request.getfixturevalue('native_bridge')
+    compiler = os.environ.get('CC') or shutil.which('cc') or shutil.which('gcc')
+    source = ROOT / 'tests' / 'workloads' / 'dsl' / 'rewrite_repair_fixture.S'
+    library = tmp_path / ('repair_fixture' + native_bridge.suffix)
+    flags = ['-Wl,--export-all-symbols'] if sys.platform == 'win32' else ['-fPIC']
+    subprocess.run([compiler, '-shared', *flags, str(source), '-o', str(library)], check=True)
+    fixture = ctypes.CDLL(str(library))
+    fixture.repair_config.argtypes = (ctypes.c_int,)
+    fixture.repair_regex.argtypes = (ctypes.c_void_p, ctypes.c_int)
+    fixture.repair_complex.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    sites = ('repair_config_site', 'repair_regex_site', 'repair_complex_site')
+    targets = [(ctypes.cast(getattr(fixture, site), ctypes.c_void_p).value, None) for site in sites]
+    patch = parser.load(REWRITE_LENGTH_REPAIR)
+    compiled = vm.compile_patch(patch)
+
+    # Control calls use only ordinary flags and never execute nginx code.
+    assert fixture.repair_config(0) == 0xa9
+    session = frida.attach(os.getpid())
+    try:
+        script = session.create_script(vm_run._script(patch, compiled, targets, native_bridge))
+        script.load()
+        script.exports_sync.install()
+        assert fixture.repair_config(1) == -1
+        assert fixture.repair_config(0) == 0xe9
+
+        engine = (ctypes.c_uint8 * 66)()
+        engine[63], engine[64], engine[65] = 0x51, 0xff, 0x52
+        assert fixture.repair_regex(engine, 1) == -1
+        assert engine[64] == 0xff
+        assert fixture.repair_regex(engine, 0) == 0xf3
+        assert list(engine[63:66]) == [0x51, 0xf3, 0x52]
+
+        local = (ctypes.c_uint8 * 66)()
+        engine[32:48] = bytes(range(16))
+        local[63], local[65] = 0x51, 0x52
+        for flags, expected in [(0x08, 0xab), (0x04, 0xa7)]:
+            engine[64] = flags
+            assert fixture.repair_complex(engine, local) == expected
+            assert engine[64] == flags
+            assert list(local[63:66]) == [0x51, expected, 0x52]
+            assert bytes(local[32:48]) == bytes(range(16))
+
+        status = script.exports_sync.status()
+        assert [status['hits'][mount.id] for mount in patch.mounts] == [1, 1, 2]
     finally:
         session.detach()
