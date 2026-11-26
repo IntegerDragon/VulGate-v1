@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -42,6 +43,13 @@ def _target_address(pid: int | None, mount: dsl_parser.MountSpec,
     if info is None:
         raise ValueError('cannot find module for mount ' + mount.id)
     module, base, path = info
+    if mount.flag_clear is not None:
+        binary = Path(f'/proc/{pid}/exe') if pid is not None else path
+        if not binary.samefile(path):
+            raise ValueError('repair_point target is not the running executable: ' + mount.id)
+        actual_id = dsl_resolve.frida_symbols.build_id(binary)
+        if actual_id != mount.build_id:
+            raise ValueError(f'{mount.id}: expected Build ID {mount.build_id}, found {actual_id}')
     if mount.offset is None:
         offsets = dsl_resolve.frida_symbols.symbol_offsets(path, [mount.symbol])
         if mount.symbol not in offsets:
@@ -64,17 +72,18 @@ def _script(patch: dsl_parser.PatchSpec, compiled: dsl_vm.VMPatch,
             targets: list[tuple[int, str | None]], bridge: Path) -> str:
     entries = []
     for mount, target in zip(compiled.mounts, targets):
+        flag_clear = asdict(mount.flag_clear) if mount.flag_clear is not None else None
         if mount.action_id is None:
             action_expr = 'undefined'
         else:
             action_expr = _action_value(patch.actions[mount.action_id])
         entries.append(
             '{id: %s, args: %s, return_type: %s, target: %s, code: %s, '
-            'action: %s, nature: %s, locals: %s}' % (
+            'action: %s, nature: %s, locals: %s, flag_clear: %s}' % (
                 json.dumps(mount.id), json.dumps(mount.args),
                 json.dumps(mount.return_type), json.dumps(hex(target[0])),
                 json.dumps(list(mount.code)), action_expr,
-                json.dumps(mount.nature), json.dumps(mount.locals)))
+                json.dumps(mount.nature), json.dumps(mount.locals), json.dumps(flag_clear)))
     mounts_literal = '[' + ', '.join(entries) + ']'
     capacities = [int(item['capacity']) for item in compiled.maps]
     map_literal = json.dumps({'count': len(capacities),
@@ -134,8 +143,44 @@ function vg_store_local(target, slot, value) {
   else target.add(slot * 8).writeU64(value);
 }
 
+function vg_install_flag_repair(spec) {
+  const target = ptr(spec.target);
+  const range = Process.findRangeByAddress(target);
+  if (range === null || !range.protection.includes('x')) {
+    throw new Error('repair_point needs an executable entry: ' + spec.id);
+  }
+  const clear = spec.flag_clear;
+  const listener = Interceptor.attach(target, {
+    onEnter: function(callArgs) {
+      VG_HITS[spec.id] = (VG_HITS[spec.id] || 0) + 1;
+      try {
+        const base = callArgs[clear.argument];
+        if (base.isNull()) {
+          VG_RUN[spec.id] = 'repair-skipped-null';
+          return;
+        }
+        const address = base.add(clear.offset);
+        const before = address.readU8();
+        if ((before & clear.mask) === 0) {
+          VG_RUN[spec.id] = 'repair-unneeded';
+          return;
+        }
+        address.writeU8(before & ~clear.mask);
+        VG_RUN[spec.id] = 'repaired';
+      } catch (error) {
+        VG_RUN[spec.id] = 'repair-error: ' + error;
+      }
+    },
+  });
+  VG_STATE.push({id: spec.id, target: String(target), nature: spec.nature, listener: listener});
+}
+
 function vg_install() {
   for (const spec of VG_MOUNTS) {
+    if (spec.flag_clear !== null) {
+      vg_install_flag_repair(spec);
+      continue;
+    }
     const code = Memory.alloc(spec.code.length);
     code.writeByteArray(spec.code);
     const handle = create(code, spec.code.length);

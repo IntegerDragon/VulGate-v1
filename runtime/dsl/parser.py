@@ -48,6 +48,13 @@ class ActionSpec:
     writes: list[dict] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class FlagClearSpec:
+    argument: int
+    offset: int
+    mask: int
+
+
 @dataclass
 class MountSpec:
     id: str
@@ -64,6 +71,8 @@ class MountSpec:
     file: str | None = None
     line: int | None = None
     local_recipes: dict = field(default_factory=dict)
+    build_id: str | None = None
+    flag_clear: FlagClearSpec | None = None
 
 
 @dataclass
@@ -284,6 +293,20 @@ def _parse_action(identifier: str, body: str) -> ActionSpec:
     return spec
 
 
+def _parse_flag_clear(body: str, args: list[str]) -> FlagClearSpec:
+    number = r'(0[xX][0-9a-fA-F]+|[0-9]+)'
+    match = re.fullmatch(rf'\s*clear_arg_u8\(\s*arg([0-5])\s*,\s*{number}\s*,\s*{number}\s*\)\s*;\s*', body)
+    if match is None:
+        raise DSLParseError('repair_point needs exactly one clear_arg_u8(argN, offset, mask)')
+    index, offset, mask = (int(text, 16 if text.lower().startswith('0x') else 10)
+                           for text in match.groups())
+    if index >= len(args) or args[index] != 'pointer':
+        raise DSLParseError('clear_arg_u8 requires a declared pointer argument')
+    if not 0 <= offset <= 4095 or not 1 <= mask <= 255:
+        raise DSLParseError('clear_arg_u8 offset must be 0..4095 and mask 1..255')
+    return FlagClearSpec(index, offset, mask)
+
+
 def parse(text: str) -> PatchSpec:
     text = _strip_comments(text)
     actions: dict[str, ActionSpec] = {}
@@ -330,9 +353,10 @@ def parse(text: str) -> PatchSpec:
             if location_caller:
                 caller = location_caller
         nature = fields.get('性质', fields.get('nature', '拦截点')).strip()
-        if nature not in ('拦截点', '读取点', 'intercept', 'read', 'read_point'):
+        if nature not in ('拦截点', '读取点', 'intercept', 'read', 'read_point', 'repair_point'):
             raise DSLParseError(f'mount {identifier} has invalid 性质: {nature}')
-        nature = '读取点' if nature in ('读取点', 'read', 'read_point') else '拦截点'
+        if nature != 'repair_point':
+            nature = '读取点' if nature in ('读取点', 'read', 'read_point') else '拦截点'
         body = fields.get('行为', fields.get('behavior'))
         if body is None:
             # 行为 usually opens a nested block: split_fields sees "行为: {" ... "}"
@@ -343,10 +367,21 @@ def parse(text: str) -> PatchSpec:
         if not behavior_match:
             raise DSLParseError(f'mount {identifier} has no 行为')
         behavior, _ = _find_block(block, behavior_match.end())
+        build_id = fields.get('build_id')
+        flag_clear = None
+        if nature == 'repair_point':
+            if location_kind != 'symbol' or module or caller or (offset is not None and offset < 0):
+                raise DSLParseError('repair_point requires a function entry in the main executable')
+            if not build_id or not re.fullmatch(r'[0-9a-fA-F]{40}', build_id.strip('"\'')):
+                raise DSLParseError('repair_point requires a 40-digit hexadecimal build_id')
+            build_id = build_id.strip('"\'').lower()
+            flag_clear = _parse_flag_clear(behavior, args)
+        elif build_id is not None:
+            raise DSLParseError('build_id is supported on repair_point only')
         mounts.append(MountSpec(
             identifier, module, symbol, args, return_type, nature, behavior, offset,
             location_kind=location_kind, caller=caller, callee=callee,
-            file=file_name, line=line))
+            file=file_name, line=line, build_id=build_id, flag_clear=flag_clear))
     if not mounts:
         raise DSLParseError('DSL has no 挂载点')
     return PatchSpec(actions, mounts, maps)

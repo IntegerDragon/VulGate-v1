@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from runtime.dsl import parser, vm  # noqa: E402
+from runtime.dsl import vm_run  # noqa: E402
 from runtime.frida.build import build  # noqa: E402
 
 
@@ -19,7 +20,7 @@ FINE_PATCHES = ROOT / 'runtime' / 'dsl' / 'patches_fine'
 
 
 @pytest.fixture(scope='module')
-def run_guard(tmp_path_factory):
+def native_bridge(tmp_path_factory):
     if ctypes.sizeof(ctypes.c_void_p) != 8:
         pytest.skip('fine patch fixtures use 64-bit pointers')
     compiler = os.environ.get('CC') or shutil.which('cc') or shutil.which('gcc')
@@ -38,7 +39,12 @@ def run_guard(tmp_path_factory):
         ], cwd=ROOT, check=True)
     else:
         library = Path(build(directory, cc=compiler)['bridge'])
-    bridge = ctypes.CDLL(str(library))
+    return library
+
+
+@pytest.fixture(scope='module')
+def run_guard(native_bridge):
+    bridge = ctypes.CDLL(str(native_bridge))
     bridge.vg_program_create.argtypes = (ctypes.c_char_p, ctypes.c_uint)
     bridge.vg_program_create.restype = ctypes.c_void_p
     bridge.vg_program_destroy.argtypes = (ctypes.c_void_p,)
@@ -289,3 +295,87 @@ def test_regex_reallocation_guard_preserves_unrelated_calls(
     request[1210] = flags
 
     assert run_guard('42533', ctypes.addressof(request), ctypes.addressof(regex), 0) == decision
+
+
+REWRITE_REPAIR = FINE_PATCHES / 'CVE-2026-42945.vg'
+
+
+@pytest.mark.parametrize(('source', 'replacement', 'error'), [
+    ('args=[pointer]', 'args=[uint64]', 'declared pointer'),
+    ('arg0, 64', 'arg1, 64', 'declared pointer'),
+    ('0x08', '0', 'mask 1..255'),
+    ('arg0, 64', 'arg0, 4096', 'offset must be'),
+    ('0x08);', '0x08); clear_arg_u8(arg0, 8, 1);', 'exactly one'),
+    ('24ffa74c6144d36f19d953cfa960ff2e7df0fdb2', 'aabb', 'hexadecimal build_id'),
+    ('nature: repair_point', 'nature: read_point', 'repair_point only'),
+    ('location: symbol=', 'location: module="other", symbol=', 'main executable'),
+])
+def test_repair_point_rejects_unsupported_operations(source, replacement, error):
+    text = REWRITE_REPAIR.read_text(encoding='utf-8').replace(source, replacement)
+    with pytest.raises(parser.DSLParseError, match=error):
+        parser.parse(text)
+
+
+def test_repair_point_requires_the_matching_build_id(tmp_path, monkeypatch):
+    mount, = parser.load(REWRITE_REPAIR).mounts
+    target = tmp_path / 'nginx'
+    target.touch()
+    monkeypatch.setattr(vm_run.dsl_resolve.frida_symbols, 'build_id', lambda _path: 'a' * 40)
+    with pytest.raises(ValueError, match='expected Build ID'):
+        vm_run._target_address(None, mount, target)
+
+    monkeypatch.setattr(vm_run.dsl_resolve.frida_symbols, 'build_id', lambda _path: mount.build_id)
+    assert vm_run._target_address(None, mount, target) == (0x9b4b0, 'nginx')
+
+
+def test_repair_point_clears_only_the_expected_bit_and_runs_original(request, tmp_path):
+    frida = pytest.importorskip('frida')
+    native_bridge = request.getfixturevalue('native_bridge')
+    compiler = os.environ.get('CC') or shutil.which('cc') or shutil.which('gcc')
+    source = tmp_path / 'fixture.c'
+    source.write_text('''
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+void rewrite_end(unsigned char *engine)
+{
+    if (engine) {
+        engine[64] &= ~4;
+        engine[0] += 1;
+    }
+}
+''', encoding='utf-8')
+    library = tmp_path / ('fixture' + native_bridge.suffix)
+    mode = '-dynamiclib' if sys.platform == 'darwin' else '-shared'
+    args = [compiler, '-std=c11', '-O0', mode, source.name, '-o', library.name]
+    if sys.platform != 'win32':
+        args.append('-fPIC')
+    subprocess.run(args, cwd=tmp_path, check=True)
+    original = ctypes.CDLL(str(library)).rewrite_end
+    original.argtypes = (ctypes.c_void_p,)
+    original.restype = None
+    address = ctypes.cast(original, ctypes.c_void_p).value
+    patch = parser.load(REWRITE_REPAIR)
+    mount, = patch.mounts
+    compiled = vm.compile_patch(patch)
+
+    session = frida.attach(os.getpid())
+    try:
+        script = session.create_script(vm_run._script(
+            patch, compiled, [(address, None)], native_bridge))
+        script.load()
+        script.exports_sync.install()
+        for flags, expected, status in [(0xff, 0xf3, 'repaired'),
+                                        (0xa7, 0xa3, 'repair-unneeded')]:
+            engine = (ctypes.c_uint8 * 66)()
+            engine[63], engine[64], engine[65] = 0x51, flags, 0x52
+            original(engine)
+            assert engine[0] == 1
+            assert list(engine[63:66]) == [0x51, expected, 0x52]
+            assert script.exports_sync.status()['run'][mount.id] == status
+        original(None)
+        status = script.exports_sync.status()
+        assert status['run'][mount.id] == 'repair-skipped-null'
+        assert status['hits'][mount.id] == 3
+    finally:
+        session.detach()

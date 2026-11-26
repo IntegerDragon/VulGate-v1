@@ -563,6 +563,8 @@ CVE-2026-42945 / CVE-2026-9256:
 
 这是有意的语义降级，不等于原始字段写补丁。
 
+`patches_fine/CVE-2026-42945.vg` 另提供一个 `repair_point`，在已核对的 nginx 构建上清除正则结束时的 `is_args` 标志，再继续原函数。安装器在挂载前比对 ELF Build ID。[安装条件与验证](runtime/dsl/patches_fine/README.md)
+
 ---
 
 ## 5. DSL → VM → Frida 性能

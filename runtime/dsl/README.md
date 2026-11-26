@@ -37,6 +37,27 @@ python -m runtime.dsl.run --dsl patch.vg --spawn ./target --duration 30
 - 比较/逻辑/算术 → 条件跳转/ALU；
 - BLOCK 后由安装器执行 action 返回值，PASS 调原函数。
 
+## 函数入口状态修复
+
+`repair_point` 用于上游修复只需更新函数参数里的标志位、随后继续原函数的场景。
+
+```text
+mount example:
+{
+    location: symbol="script_step", args=[pointer], return=void
+    nature: repair_point
+    build_id: "0123456789abcdef0123456789abcdef01234567"
+    behavior:
+    {
+        clear_arg_u8(arg0, 64, 0x08);
+    }
+}
+```
+
+安装器先比对主程序 ELF Build ID，再用 Frida 的函数入口回调清除一个字节中掩码指定的位。其他位与相邻字段保留，原函数照常执行。`clear_arg_u8` 接受参数列表中声明的 `pointer`，字节偏移范围为 `0..4095`，掩码范围为 `1..255`。每个修复点只有一次位清除。已核对的模块相对入口偏移可以写在 `location.offset`，支持对应的 stripped 构建。
+
+修复动作由安装器执行。Shadow VM 的拦截判定仍只读。运行结果在 `run` 中报告 `repaired`、`repair-unneeded`、`repair-skipped-null` 或 `repair-error`。构建不匹配时安装在挂载前失败。
+
 ## 程序级 map / observer
 
 ```text
@@ -123,7 +144,7 @@ python -m runtime.dsl.vm_93479_validate
 
 ## 限制
 
-- VM 只读，action writes 未实现；
+- VM 只读，安装器的状态修复限于 `repair_point` 的参数标志位清除；
 - DSL→VM 目前支持 20 例子集：无循环；callsite 仅解析直接 call；
 - 位置解析只适配 x86-64 Linux；
 - map 支持字面量/动态 u64 key；运行时字符串 key 未支持；
